@@ -1,4 +1,4 @@
-# DC-OGX-W Windows Companion v0.1.3
+# DC-OGX-W Windows Companion v0.1.4
 
 This is a **separate Windows-only Tauri 2/Rust project**. It does not modify the RP2040 firmware, the existing WebUI or the Linux/macOS Python companion.
 
@@ -46,7 +46,7 @@ The build script copies the **single native executable** to `dist-portable/DC-OG
 - `src-tauri/src/control.rs`: WebSocket ownership, input snapshots, deadman-aware neutralization, keyboard or native XInput
 - `src-tauri/src/main.rs`: Tauri commands and local preferences storage
 - `ui/`: standalone frontend, eight original firmware WebUI themes; actual OG Xbox White/Black buttons, keyboard mapping, device panels
-- `tests/check-ui.cjs`: portable checks with Node (no external test dependencies)
+- Development-only UI tests are excluded from this cleaned repository archive; keep them in a separate developer checkout if desired
 
 The firmware's remote API v2 is required. Input snapshots use the firmware's **+Y-up** convention, and 60 Hz or the board-advertised lower rate. This initial build **does not auto-reacquire ownership after a connection failure**. That is intentional: an ambiguous lost HTTP acquire response must not be replayed. After a drop, release input and manually take control again.
 
@@ -58,10 +58,4 @@ The **full profile editor/remapper**, **Bluetooth calibration flow**, **firmware
 
 ## Verification
 
-```powershell
-npm.cmd run check:ui
-cd src-tauri
-cargo test
-```
-
-`cargo test` and actual Windows EXE production must run with the configured Windows build tools. Hardware networking, XInput, and WebView2 behavior still require a real board test.
+Run `npm.cmd run build` (or `build-portable.ps1`) with Windows build tools. Then launch the EXE and test device discovery, status, keyboard/XInput, White/Black button mapping, neutral release, theme persistence and HTTP configuration on the actual adapter. This trimmed release omits the standalone UI-test command; `cargo test` remains available if you add native tests in a development checkout.

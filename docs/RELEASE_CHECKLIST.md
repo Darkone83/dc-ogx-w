@@ -1,42 +1,33 @@
-# Release checklist — dc-ogx-w software framework foundation
+# Release checklist — DC-OGX-W
 
-This is a complete **source snapshot** with functional software improvements, not a hardware-qualified production firmware release. Version remains `0.2.4` until the maintainer assigns a new version. No prebuilt UF2 is supplied.
+This is a **documentation-aligned source snapshot**, not a hardware-qualified release. The firmware project version in this ZIP is `0.2.4`. The supplied `firmware/` images and `apps/Windows/bin/` executable are preserved without rebuilding and may represent earlier local revisions.
 
-## Implemented and host-tested in this pass
+## Source integration
 
-- [x] Preserve prior OLED update/activity screens, Wi-Fi recovery and core Xbox USB output sources.
-- [x] Responsive WebUI with desktop sidebar and mobile drawer; retain tab IDs and API handlers.
-- [x] Eight distinct self-contained browser-local themes; no external resource fetches.
-- [x] Live two-stick / two-trigger preview **within Profiles** using the browser Gamepad API.
-- [x] Custom 16×16 OLED status glyph atlas and low-frequency activity animation.
-- [x] Build-time OLED contrast, startup fade and opt-in idle dim settings.
-- [x] Runtime Device OLED controls: brightness, dim/off timeouts, idle brightness, enable, invert, flip and fade.
-- [x] OLED preferences persisted in a separate validated device NVS record with deferred HTTP response commit/cancel.
-- [x] Browser-local reassignable keyboard buttons, D-pad, triggers and stick directions; conflict swap and reset.
-- [x] Stage GP9 D+ / GP10 D− in CMake with USB host explicitly **OFF**.
-- [x] Preserve user-facing README, credits, contributing notes and GitHub templates.
-- [x] Add WebUI desktop/mobile browser regressions and native OLED/ESP-AT tests.
+- [ ] Merge the latest maintainer-approved network/UDP/Core0 firmware patches into `src/src/` as intended.
+- [ ] Merge the successful PIO-USB CMake integration into `src/CMakeLists.txt`, `src/cmake/` and `src/CMakePresets.json` where appropriate; keep non-PIO presets for rollback.
+- [ ] Confirm `src/tools/firmware/make_update.py` exists locally and generates checked `.ogxw` images.
+- [ ] Verify all targets compile using VS Code **Compile** without an extra build workaround and with the intended SDK/toolchain versions.
+- [ ] Check both board target outputs fit their linker flash limits and name/version labels match the board firmware image.
 
-## Not implemented / awaiting validation
+## Physical hardware validation
 
-- [ ] Full Pico SDK + GCC ARM cross-build of **both** supported board targets.
-- [ ] Physical tests on RP2040-Pico W-2023 clone (ESP8285 AT) and official Pico W.
-- [ ] Confirm actual WebUI theme persistence across navigation and browser reload on real IP origin.
-- [ ] Verify actual hardware USB controller output and input ownership during Wi-Fi loss.
-- [ ] Confirm all OLED contrast/fade/dim behavior on MakerFocus 0.91-inch panel during network load.
-- [ ] USB host hardware, 5V VBUS path and PIO-USB host implementation for GP9/GP10 **not yet done**.
-- [ ] Device-side physical input telemetry and full firmware-equivalent profile shaping preview.
-- [ ] Physical OLED runtime contrast/rotation/inversion settings and screen-off wake verified on target hardware.
-- [ ] Windows UDP input app and direct UDP control ownership (separate future project).
-- [ ] Recheck third-party license terms, credit details, release binary checksums and exact version before public release.
+- [ ] ESP8285 clone boots with its existing legacy AT firmware; SoftAP and station remain stable during extended use.
+- [ ] HTTP and WebSocket clients retain an active controller session; no unexplained `503 service_busy`, red recovery flashing or stale pressed buttons.
+- [ ] UDP discovery (if present in merged firmware) works from Windows without depending on newer modem firmware features.
+- [ ] Official Pico W Wi-Fi/Bluetooth input works and changes owner cleanly.
+- [ ] Native USB device output works and controller mode/profile mapping is correct.
+- [ ] Optional PIO-USB host on GP9/GP10 safely enumerates a low-power controller with protected 5 V VBUS; verify host disconnect and latency.
+- [ ] OLED brightness, rotation, fade, idle dim/off and operation notices work on the physical 0.91-inch 128×32 display.
+- [ ] RGB LED status reliably reflects genuine failures, not only delayed HTTP responses.
+- [ ] Firmware updater validates board identity and can install a checked `.ogxw` with BOOTSEL recovery available.
 
-## Suggested smoke test
+## Packaging and documentation
 
-1. Build `cmake --preset pico-w-2023 && cmake --build --preset pico-w-2023 --parallel`.
-2. Flash with RP2040 BOOTSEL; keep ESP8285 AT firmware intact.
-3. Load WebUI from IP in desktop and phone browsers; confirm sidebar/mobile menu and each theme.
-4. Tune deadzone with a controller connected to the **browser host** and verify raw/preview stick markers.
-5. On **Device → OLED display**, test Apply now on brightness, invert, flip and both idle timeouts; leave screen idle, trigger an activity and confirm wake. Test Save and restart, reconnect and check persisted values.
-6. On **Control → Keyboard mapping**, change A/B keys, stick directions and trigger keys; test swapped duplicate mappings and Reset keys, including a browser reload.
-7. Check OLED startup, profile save and update-progress statuses under normal controller/network load.
-8. Test fixed/changed browser source ownership and Wi-Fi reconnection; verify input always goes neutral after a lost lease.
+- [ ] Keep both board `.uf2`/`.ogxw` files in the `firmware/` folder and verify checksums/provenance before replacing older files.
+- [ ] Check the Windows binary against Windows companion source and confirm Python automatic dependency installation on supported platforms.
+- [ ] Confirm the public README matches the **actual merged** CMake configuration, no stale links remain and the required updater utility is included.
+- [ ] Retain root `LICENSE`, credits and third-party notices for every linked dependency, including optional USB host.
+- [ ] Do not ship developer test harnesses or stale build output in the release archive; keep tests in a separate development checkout if required.
+
+Compiling successfully is necessary but does not prove Wi-Fi stability, USB host electrical safety or a two-hour play session.

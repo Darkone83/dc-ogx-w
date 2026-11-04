@@ -7,7 +7,7 @@ Target panel: **0.91-inch, 128×32 pixels, 1-bit SSD1306**, I²C1 on GP14 SDA an
 ## Visual assets and reusable glyphs
 
 - Startup DXC emblem: pixel-designed 64×24 monochrome mark, kept independent of desktop PNG complexity.
-- Reusable atlas: [`src/Display/OledGlyphs.h`](../src/Display/OledGlyphs.h), eleven custom 16×16 icons for Wi-Fi, USB, Bluetooth, profile, controller, save, load, settings, update, success and warning. These are small row masks, not external font libraries.
+- Reusable atlas: [`src/src/Display/OledGlyphs.h`](../src/src/Display/OledGlyphs.h), eleven custom 16×16 icons for Wi-Fi, USB, Bluetooth, profile, controller, save, load, settings, update, success and warning. These are small row masks, not external font libraries.
 - The existing rasterized DejaVu-based text tables remain for numerals/statuses and IP.
 - The glyph atlas can be copied into future OGX projects; the event-specific screen rendering can remain project-specific.
 
@@ -43,11 +43,13 @@ The original CMake settings still provide *first-boot defaults*, before any save
 | `DC_OGX_OLED_IDLE_DIM_MS` | 0 | Initial dim timeout; non-preset values round up to the next WebUI option |
 | `DC_OGX_OLED_IDLE_CONTRAST` | 32 | Initial idle contrast |
 
+Run from firmware project `src/`:
+
 ```cmd
 cmake --preset pico-w-2023 -DDC_OGX_OLED_CONTRAST=192 -DDC_OGX_OLED_IDLE_DIM_MS=300000 && cmake --build --preset pico-w-2023 --parallel
 ```
 
-See [`remote-api.md`](remote-api.md) for GET `/api/oled`, POST `/api/oled/apply`, and POST `/api/oled/save`. Native host tests verify framebuffer scheduling, activity overlays, fade, idle-dim/off behavior, wake and NVS integrity; these are **not a substitute for a physical OLED test**.
+See [`remote-api.md`](remote-api.md) for GET `/api/oled`, POST `/api/oled/apply`, and POST `/api/oled/save`. Earlier development builds included host checks for framebuffer scheduling, fade, idle-dim/off behavior, wake and NVS integrity. Those tests are not bundled in this cleaned release; perform real OLED hardware validation.
 
 ## Acceptance checks before PCB release
 

@@ -70,17 +70,20 @@ else()
     add_compile_definitions(DC_OGX_OLED_FADE_ENABLED=0)
 endif()
 
-# Future PIO-USB host input for the candybar PCB. Native USB device output
-# stays enabled on both currently supported firmware targets. Explicitly fail
-# until the external host stack, power switch and scheduling have been validated.
-set(DC_OGX_USB_HOST_DP_PIN 9 CACHE STRING "Planned USB host D+ RP2040 GPIO")
-set(DC_OGX_USB_HOST_DM_PIN 10 CACHE STRING "Planned USB host D- RP2040 GPIO")
-option(DC_OGX_USB_HOST_ENABLED "Enable PIO-USB host input (not integrated yet)" OFF)
+# Experimental dual-USB host/device bring-up on the DC-OGX-W carrier PCB.
+# Native USB stays as a console USB device; PIO-USB uses consecutive GP9/GP10.
+# Leave this OFF for stable builds. Enable explicitly for a hardware test.
+set(DC_OGX_USB_HOST_DP_PIN 9 CACHE STRING "USB host D+ RP2040 GPIO")
+set(DC_OGX_USB_HOST_DM_PIN 10 CACHE STRING "USB host D- RP2040 GPIO")
+option(DC_OGX_USB_HOST_ENABLED "Experimental PIO USB wired controller input" ON)
 if(NOT DC_OGX_USB_HOST_DP_PIN STREQUAL "9" OR NOT DC_OGX_USB_HOST_DM_PIN STREQUAL "10")
-    message(FATAL_ERROR "Proposed host wiring is GP9 D+ / GP10 D-; update board mapping explicitly when hardware is final")
+    message(FATAL_ERROR "DC-OGX-W USB host PCB is wired GP9 (D+) / GP10 (D-)")
 endif()
 if(DC_OGX_USB_HOST_ENABLED)
-    message(FATAL_ERROR "USB host firmware is staged but not integrated or hardware validated yet. Leave DC_OGX_USB_HOST_ENABLED=OFF until the PIO-USB feature is implemented")
+    if(OGXM_STATUS_LED_ENABLED AND (OGXM_STATUS_LED_PIN EQUAL 9 OR OGXM_STATUS_LED_PIN EQUAL 10))
+        message(FATAL_ERROR "PIO-USB GP9/GP10 conflicts with WS2812 GPIO")
+    endif()
+    add_compile_definitions(CONFIG_EN_USB_HOST=1)
 endif()
 
 # Board capabilities are fixed by the hardware, not independent feature toggles.
@@ -109,6 +112,11 @@ elseif(PICO_BOARD STREQUAL "pico_w_2023")
     endforeach()
     if(OGXM_ESP_UART_TX_PIN EQUAL OGXM_ESP_UART_RX_PIN)
         message(FATAL_ERROR "ESP8285 UART TX and RX must use different GPIOs")
+    endif()
+    if(DC_OGX_USB_HOST_ENABLED AND
+       (OGXM_ESP_UART_TX_PIN EQUAL 9 OR OGXM_ESP_UART_TX_PIN EQUAL 10 OR
+        OGXM_ESP_UART_RX_PIN EQUAL 9 OR OGXM_ESP_UART_RX_PIN EQUAL 10))
+        message(FATAL_ERROR "ESP8285 UART cannot share PIO-USB GP9/GP10")
     endif()
     if(OGXM_STATUS_LED_ENABLED AND
        (OGXM_STATUS_LED_PIN EQUAL OGXM_ESP_UART_TX_PIN OR OGXM_STATUS_LED_PIN EQUAL OGXM_ESP_UART_RX_PIN))

@@ -1,33 +1,31 @@
-# Reusable software foundations — dc-ogx-w
+# DC-OGX-W software architecture
 
-This pass deliberately separates **what can be shared now** from what must await new hardware. Its purpose is to make dc-ogx-w a stable reference firmware that can be forked for future OGX boards without treating other boards as active compile targets.
+DC-OGX-W separates the RP2040 controller/output runtime from network/desktop input, status display and configuration. The source is under **`src/src/`**; the firmware CMake project is **`src/`**.
 
-## Current boundaries
-
-| Subsystem | State | Intended reusable contract |
+| Component | Source | Role |
 |---|---|---|
-| Device-side controller output | Existing USB device implementation | Neutral output on source disconnect; do not block USB loop |
-| ESP8285 AT transport | Existing, stabilized path | Serializes HTTP/control commands; avoid extra polling |
-| Official Pico W radio | Existing network/BT implementation | Different capabilities from ESP8285 clone |
-| OLED display | Implemented 1-bit framebuffer, glyph atlas, activity priority | Publish status via atomics, render in service context, no I²C in USB loop |
-| WebUI | Implemented responsive menu, themes, local gamepad preview | Keep tab API IDs stable, offline assets, color tokens, no extra HTTP requests |
-| USB-A PIO host (GP9 D+/GP10 D−) | **Planned, not yet enabled** | Wired gamepad input, same profile processing & ownership rules |
-| Windows UDP controller input | **Future separate Windows application** | Exclusive negotiated input ownership, sequenced whole-state packets |
+| Native USB device and console modes | `src/src/USBDevice/` | Emit console-compatible USB output; preserve neutral output on disconnect |
+| Remote control & profiles | `src/src/RemoteControl/`, `src/src/UserSettings/` | Exclusive ownership, input shaping, calibration and stored preferences |
+| Network service | `src/src/NetworkService/` | HTTP/WebSocket API, configuration, ESP8285 AT or native CYW43 transport |
+| WebUI | `src/src/NetworkService/web/index.html` | Embedded offline interface; browser-local themes and keyboard bindings |
+| OLED / LED | `src/src/Display/`, `src/src/Board/` | Status and diagnostics without blocking controller processing |
+| Firmware updater | `src/src/FirmwareUpdate/` | Board-specific validated staged update; protected flash layout |
+| Wired controller host (experimental) | `src/src/USBHost/` | PIO-USB input on GP9/GP10, separately enabled via CMake integration |
+| Desktop clients | `apps/Windows/src/`, `apps/Python/` | Tauri/Rust and PySide6 consumers of the same network protocol |
 
-## Why the browser preview is local
+## Input and protocol boundaries
 
-The original ESP8285 board has limited AT command concurrency. The Profiles editor now uses the *browser host's* Gamepad API as input for live stick/trigger comparison, with local preview shaping. This avoids introducing continuous API polling. It is ideal for tuning while the controller is attached to the PC, but does **not** represent controller input delivered directly to the RP2040. When native USB host support arrives, a device telemetry channel can be added behind an explicit capability flag; do not expose unsupported controls simply because an unrelated board supports Bluetooth.
+The ESP8285 clone uses legacy AT firmware over UART0. Its command channel is serialized and has limited concurrent socket support, so noncritical station maintenance, UDP discovery and display activity must never hold controller work indefinitely. The official Pico W uses CYW43439 and can additionally support Bluetooth. Features must be detected per board rather than inferred from the other variant.
 
-## Input arbitration — next framework stage
+USB device output and network input have different timing requirements. Stale controller snapshots must be neutralized and not replayed. A remote lease must be released or expire reliably, even if the browser/desktop client disappears. Flash saving and firmware installation are deferred until response/maintenance safeguards are satisfied; the updater is **not** power-failure-proof A/B.
 
-One input source will own Xbox output at a time: browser WebSocket, Bluetooth controller (where supported), planned wired host, or eventual Windows UDP session. Acquisition must explicitly neutralize the previous owner's state and release stale buttons. A lost connection must neutralize in a bounded timeout. UI should always show the **actual owner**, and network failure must not imply USB is unavailable. The source-specific reader should translate input into a common normalized controller snapshot before profile shaping and USB output.
+## Source and migration status
 
-The initial version of this framework **does not replace the existing controller core**. It stages future host board pin definitions and UI capability directions without taking ownership away from proven live paths.
+The uploaded snapshot contains core host runtime but not its final CMake wiring. The maintainer has separately verified that a newer PIO-USB CMake build compiles and will integrate it manually. Similarly, network/UDP/Core0 changes made after this ZIP should not be assumed present until merged. Keep board-specific builds and verify software behavior on real hardware before publishing images.
 
-## Reuse recommendations
+## Reuse rules
 
-1. Keep `src/Display/OledGlyphs.h` and general OLED framebuffer/utilities reusable; keep product logo and controller-specific status in the product layer.
-2. Keep WebUI appearance tokens separate from network calls; reuse the same offline sidebar/drawer shell and remove unsupported destinations according to device capabilities.
-3. Expose input source capabilities explicitly (Bluetooth, wired USB host, remote WebSocket, UDP) instead of using Bluetooth capability as a synonym for physical controller presence.
-4. Add real board/runtime integration tests before expanding the set of board targets.
-5. Preserve upstream OGX-Mini, Pico SDK, TinyUSB and BTstack credits and applicable license notices.
+- Keep the self-contained WebUI and OLED glyphs reusable, but preserve stable API paths and hardware-specific capability checks.
+- Avoid extra UI polling and blocking or infinite retries on the legacy ESP AT connection.
+- Keep wired input, native Bluetooth and network input separate at the transport boundary; normalize controller state before profile shaping.
+- Do not remove upstream OGX-Mini, Pico SDK, TinyUSB, BTstack, PIO-USB or other third-party notices when redistributing linked code.

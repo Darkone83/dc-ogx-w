@@ -10,6 +10,7 @@
 
 #if defined(CONFIG_EN_USB_HOST)
 #include "pio_usb.h"
+#include "USBHost/WiredHost.h"
 #endif
 
 #include "Board/Config.h"
@@ -39,7 +40,7 @@ void tusb_time_delay_ms_api(uint32_t ms) {
     const uint32_t start = tusb_time_millis_api();
     while ((tusb_time_millis_api() - start) < ms) {
 #if defined(CONFIG_EN_USB_HOST)
-        pio_usb_host_frame();
+        if (WiredHost::active() && !WiredHost::sof_timer_running()) pio_usb_host_frame();
         const uint32_t now = tusb_time_millis_api();
         while (tusb_time_millis_api() == now) {
             tight_loop_contents();

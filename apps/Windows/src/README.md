@@ -1,10 +1,10 @@
-# DC-OGX-W Windows Companion — v0.1.3
+# DC-OGX-W Windows Companion — v0.1.4
 
 A separately packaged, portable **Tauri 2 + Rust** Windows application for DC-OGX-W, using the firmware WebUI's actual styling, DXC branding, original eight themes, and controller layout. This package does **not** contain or alter the RP2040 firmware.
 
 ## Build
 
-This archive contains **source**, not an already compiled Windows EXE. On Windows 10/11 x64 with Node.js, Rust stable MSVC, C++ Build Tools and WebView2 installed, extract it and run:
+This folder is **source**; the repository also ships a separately copied executable at `../bin/dc-ogx-w.exe`. Its exact match to the current source has not been reverified in this cleanup. On Windows 10/11 x64 with Node.js, Rust stable MSVC, C++ Build Tools and WebView2 installed, extract it and run:
 
 ```powershell
 .\build-portable.ps1
@@ -24,4 +24,4 @@ UDP discovery (including ESP8285 with a discovery-capable firmware), manual IP c
 
 **Advanced WebUI-only features not yet ported:** full profile editing, Bluetooth calibration, advanced button remapping and firmware upload. Use the firmware WebUI for those operations.
 
-Linux/macOS Python companion and firmware networking code are unchanged. See `CONTROLLER_WEBUI_PARITY_v0.1.3.md` for mapping and testing details.
+Linux/macOS Python companion and firmware networking code are unchanged. See `CONTROLLER_WEBUI_PARITY_v0.1.4.md` for mapping and testing details.

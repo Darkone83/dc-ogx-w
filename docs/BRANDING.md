@@ -18,6 +18,6 @@ The individual assets in [`assets/branding/`](../assets/branding/) are derived f
 
 The animated or colored desktop splash artwork **cannot** be displayed directly on the 128×32 monochrome OLED; the device intentionally uses the simplified bitmap rather than truncating a 16:9 composition.
 
-For a future enclosure, packaging or Windows client, prefer the compact icon and matching wordmark. Use source assets rather than crops from README screenshots. These are raster derivatives of concept artwork, not editable vector master files.
+For the supplied enclosure, packaging or Windows client, prefer the compact icon and matching wordmark. Use source assets rather than crops from README screenshots. These are raster derivatives of concept artwork, not editable vector master files.
 
 The `concepts/` subfolder is visual reference only, not product documentation.

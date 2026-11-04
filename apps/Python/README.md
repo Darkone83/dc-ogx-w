@@ -22,17 +22,13 @@ python3 ogx_remote.py --host 192.168.1.40 tap a --duration 0.15
 python3 ogx_remote.py --host 192.168.1.40 desktop-sdl  # older pygame window
 ```
 
-`RemoteClient`, `PadState`, CLI input scripts, the localhost WebUI bridge and the existing protocol tests are preserved. The PySide6 desktop has a keyboard/controller visualization, remapping, gamepad input, status, device and profile views, and opens the firmware WebUI for advanced configuration. The GUI **does not clone the complete WebUI profile editor**.
+`RemoteClient`, `PadState`, CLI input scripts and the localhost WebUI bridge are preserved. Historical protocol tests are not bundled in this cleaned release. The PySide6 desktop has a keyboard/controller visualization, remapping, gamepad input, status, device and profile views, and opens the firmware WebUI for advanced configuration. The GUI **does not clone the complete WebUI profile editor**.
 
 The app keeps all HTTP and WebSocket networking off the Qt GUI thread. It sends complete fresh snapshots, uses existing firmware ownership/heartbeat semantics, and does not queue or replay stale input across disconnects. Idle device status requests are performed only while not playing, to minimize AT command contention on the legacy modem.
 
 Preferences: Windows `%APPDATA%/dc-ogx-w/python-remote.json`, Linux `~/.config/dc-ogx-w/python-remote.json`, macOS `~/Library/Application Support/dc-ogx-w/python-remote.json`. CLI/API use the same original device endpoints.
 
 ## Development / troubleshooting
-
-```sh
-python3 -m unittest discover -s tests -v
-```
 
 If dependency installation is blocked or the machine is offline, install requirements manually into an activated venv:
 

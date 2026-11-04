@@ -17,6 +17,9 @@
 #include "TaskQueue/TaskQueue.h"
 #include "USBDevice/DeviceManager.h"
 #include "UserSettings/UserSettings.h"
+#if defined(CONFIG_EN_USB_HOST)
+#include "USBHost/WiredHost.h"
+#endif
 
 namespace {
 
@@ -52,11 +55,14 @@ void pico_w_2023::initialize() {
     }
     DeviceManager::get_instance().initialize_driver(driver, gamepads);
     RemoteControl::begin(gamepads[0], driver);
+#if defined(CONFIG_EN_USB_HOST)
+    WiredHost::initialize(gamepads);
+#endif
 }
 
 void pico_w_2023::run() {
-    // The board's built-in USB connector is the controller output. There is no
-    // external host port and no dependency on a physical input being connected.
+    // Native USB is the console output. Optional GP9/GP10 host input is
+    // serviced from Core0 without changing the ESP8285's AT transport.
     tud_init(BOARD_TUD_RHPORT);
     TaskQueue::Core0::process_tasks();
     multicore_reset_core1();
@@ -67,6 +73,9 @@ void pico_w_2023::run() {
         TaskQueue::Core0::process_tasks();
         DeviceServices::tick(to_ms_since_boot(get_absolute_time()), tud_mounted(), false);
         tud_task();
+#if defined(CONFIG_EN_USB_HOST)
+        WiredHost::poll();
+#endif
         for (uint8_t i = 0; i < MAX_GAMEPADS; ++i) {
             Gamepad& output = i == 0 ? RemoteControl::output_gamepad(gamepads[i]) : gamepads[i];
             driver->process(i, output);

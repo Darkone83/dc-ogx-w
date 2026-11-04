@@ -10,6 +10,9 @@ This project is developed by **Darkone83 / DarkoneCustoms**. Thanks to the origi
 
 ## Libraries and toolchains
 
+- **Pico-PIO-USB** — optional wired USB-host implementation when enabled and linked; preserve its upstream notices and review the exact pinned revision.
+- **Tauri / Rust** — optional Windows companion application; its dependencies have independent licenses.
+- **PySide6, aiohttp, pygame** — Python desktop/network companion dependencies with independent redistribution obligations.
 - **Raspberry Pi Pico SDK** — RP2040 C/C++ firmware toolchain and hardware access.
 - **TinyUSB** — USB device stack (pinned fork in `cmake/dependencies.cmake`).
 - **Bluepad32**, **BTstack** — Bluetooth controller support on official Pico W builds; licensing differs from the Wi-Fi-only build.

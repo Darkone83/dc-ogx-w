@@ -31,6 +31,24 @@
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "DC_OGX_OLED_HEIGHT": "32"
             }
+        },
+        {
+            "name": "pico-w-2023-pio",
+            "displayName": "Pico W-2023 / ESP8285 \u2014 GP9/GP10 PIO USB bring-up",
+            "inherits": "pico-w-2023",
+            "binaryDir": "${sourceDir}/build/pico-w-2023-pio",
+            "cacheVariables": {
+                "DC_OGX_USB_HOST_ENABLED": "ON"
+            }
+        },
+        {
+            "name": "pico-w-pio",
+            "displayName": "Official Pico W \u2014 GP9/GP10 PIO USB bring-up",
+            "inherits": "pico-w",
+            "binaryDir": "${sourceDir}/build/pico-w-pio",
+            "cacheVariables": {
+                "DC_OGX_USB_HOST_ENABLED": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -41,6 +59,14 @@
         {
             "name": "pico-w",
             "configurePreset": "pico-w"
+        },
+        {
+            "name": "pico-w-2023-pio",
+            "configurePreset": "pico-w-2023-pio"
+        },
+        {
+            "name": "pico-w-pio",
+            "configurePreset": "pico-w-pio"
         }
     ]
 }

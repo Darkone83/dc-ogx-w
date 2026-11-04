@@ -1,52 +1,34 @@
 # Contributing to DC-OGX-W
 
-Thanks for helping improve the DarkoneCustoms adapter. The project is firmware for resource-constrained hardware, so **correctness, controller safety, and radio stability** take priority over feature count.
+Controller safety, radio stability and repeatable builds take priority over adding features. Please submit focused changes and state what was verified on actual hardware rather than relying solely on simulations.
 
-## Before opening an issue
+## Project locations
 
-Search existing issues. Include the board (**Pico W-2023 ESP8285** or **official Pico W**), the `dc-ogx-w` source version, the ESP-AT version if applicable, the WebUI access mode (SoftAP or station), and clear steps to reproduce. For a UI report, include the browser, selected Appearance theme and a screenshot. Do **not** post Wi-Fi passwords, private keys, or other credentials.
+- Firmware and Pico SDK/CMake project: **`src/`**; C++ implementation under `src/src/`.
+- Embedded WebUI: `src/src/NetworkService/web/index.html`.
+- Desktop applications: `apps/Windows/src/` (Tauri/Rust) and `apps/Python/` (PySide6).
+- PCB design and case: `PCB/` and `STL/`.
 
-## Development environment
+## Building
 
-Use **Pico SDK 2.3.0**, CMake, Ninja, Git, Python and an Arm cross-compiler. Build each board in its **own preset build directory**:
+With Pico SDK 2.3.0, ARM toolchain, Git, Python, CMake and Ninja available, open `src/` in the Pico VS Code extension or run from that directory:
 
-```cmd
-cmake --preset pico-w-2023 && cmake --build --preset pico-w-2023 --parallel
+```powershell
+cmake --preset pico-w-2023
+cmake --build --preset pico-w-2023 --parallel
 ```
 
-or
+Use `pico-w` for official Pico W. The firmware packaging hook expects `src/tools/firmware/make_update.py` in the repository. PIO host requires the separately validated local CMake integration; **the uploaded source snapshot's CMake does not yet enable it**. Never bypass an intentionally rejected flag by changing it without bringing over its linked source/dependency definitions. See [build guide](docs/BUILD_AND_FLASH.md).
 
-```cmd
-cmake --preset pico-w && cmake --build --preset pico-w --parallel
-```
+## Engineering expectations
 
-Do not overwrite `boards/pico_w_2023.h` with an official Pico W definition. Keep the clone's **GP0/GP1 ESP UART**, **GP8 WS2812** and **GP14/GP15 OLED** allocations intact. **GP9/GP10 USB host** is only staged as a future hardware feature and must not be turned on without USB-power-path and PIO-USB scheduling validation.
+- Preserve native USB device output and the input neutralization/deadman safety behavior; never replay ambiguous or stale remote control packets.
+- ESP8285 support must respect the installed legacy AT firmware and limited serialized UART command channel. Avoid blocking Core0 for HTTP, UDP, OLED or flash activity.
+- Do not move or reuse GP0/GP1 (ESP clone UART), GP8 (RGB), GP9/GP10 (PIO host) or GP14/GP15 (OLED) without an explicit board revision.
+- Verify USB host power switching/current limiting and pull-downs before connecting a physical controller.
+- Keep embedded WebUI resources self-contained; avoid extra HTTP requests for theme assets. Maintain mobile accessibility and full original Xbox button mapping.
+- Preserve third-party source notices and licenses. Do not include passwords, personal IP information or console identifiers in bug reports.
 
-## Code changes
+This trimmed release package does **not** ship the developer's historical native test suites. Run relevant unit/integration tests from your development checkout, and report real-board behavior: board variant, firmware/source version, modem firmware if ESP8285, exact repro steps, network topology, logs and whether controller output was neutralized.
 
-- Keep controller-state updates bounded and nonblocking. Network work must not stall the USB output loop; partial controller packets must never leave input indefinitely pressed.
-- Preserve the **neutral-input safety timeout** and exclusive ownership semantics. A dropped network connection must never replay stale controller inputs.
-- Do not add an ESP8285 AT command while holding a WebSocket/HTTP/remote-control lock. Keep background polling and I²C updates bounded.
-- The WebUI is one self-hosted, embedded HTML file at `src/NetworkService/web/index.html`. **No third-party CDN, external runtime font or Javascript dependency.** Theme selection must remain browser-local.
-- OLED assets should be legible at **128×32**, not merely attractive when upscaled. Keep monochrome glyphs small and avoid full-screen redraws on every controller frame.
-- Match upstream library and source notices; never remove another contributor's license or credits.
-
-## Host testing
-
-The native tests can be run without the Pico toolchain on a desktop with Python and `g++`:
-
-```sh
-python tests/display/run.py
-python tests/esp_at/run.py --sanitize
-python tests/network/run.py
-python tests/discovery/run.py
-python tests/firmware_update/run.py
-```
-
-For UI changes, run `python tests/web/test_branding.py` and `python tests/web/test_layout.py` (optional Playwright/Chromium dependency), and manually verify **all eight themes** on desktop and narrow/mobile layouts. The browser Gamepad API preview requires a gamepad connected to the browser host; it is not yet adapter-side telemetry. For OLED changes, test the actual 0.91-inch panel in addition to host framebuffer tests. For controller/network changes, test with a live console and both SoftAP and saved-network operation as appropriate.
-
-## Pull requests
-
-Describe the problem, the smallest fix, affected board(s), native-test commands, real-device observations, and any remaining known limitations. One focused change per PR is easier to review. Add or update README and credits when changes affect features, dependencies or installation.
-
-The original software includes multiple licenses with different conditions. Review [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md) before submitting code copied from another project or packaging releases.
+See [release checklist](docs/RELEASE_CHECKLIST.md), [security](SECURITY.md) and [credits](CREDITS.md).

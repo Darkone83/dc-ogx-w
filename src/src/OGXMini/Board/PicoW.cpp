@@ -31,6 +31,9 @@
 #include "BLEServer/BLEServer.h"
 #include "Gamepad/Gamepad.h"
 #include "TaskQueue/TaskQueue.h"
+#if defined(CONFIG_EN_USB_HOST) && defined(CONFIG_OGXM_USB_DEVICE_ONLY)
+#include "USBHost/WiredHost.h"
+#endif
 #if defined(CONFIG_OGXM_NETWORK)
 #include "NetworkService/NetworkService.h"
 #include "DeviceServices/DeviceServices.h"
@@ -39,7 +42,7 @@
 static bool s_network_mode = false;
 #endif
 
-#if defined(CONFIG_EN_USB_HOST)
+#if defined(CONFIG_EN_USB_HOST) && !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
 #include "host/hcd.h"
 #include "pio_usb.h"
 #include "USBHost/HostManager.h"
@@ -66,7 +69,7 @@ extern "C" void wii_led_off(void) { board_api::set_led(false); }
 
 Gamepad _gamepads[MAX_GAMEPADS];
 
-#if defined(CONFIG_EN_USB_HOST)
+#if defined(CONFIG_EN_USB_HOST) && !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
 // PIO USB host normally uses an alarm_pool SOF timer (~1 kHz). On Pico W that collides with BTstack / TaskQueue
 // timer IRQs (see prior irq_set_exclusive_handler assert) and fixed alarm indices (alarm 3 "already claimed").
 // Use skip_alarm_pool + pio_usb_host_frame() every ~1 ms from Core0 main loop (or Wii Core1 loop).
@@ -352,7 +355,7 @@ static void gpio_device_process_cb(void* ctx) {
 }
 #endif // !CONFIG_OGXM_USB_DEVICE_ONLY
 
-#if defined(CONFIG_EN_USB_HOST)
+#if defined(CONFIG_EN_USB_HOST) && !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
 constexpr uint32_t FEEDBACK_DELAY_MS = 200;
 
 void core1_task_wii_usb_host() {
@@ -491,7 +494,11 @@ void pico_w::initialize() {
     DeviceManager& device_manager = DeviceManager::get_instance();
     device_manager.initialize_driver(user_settings.get_current_driver(), _gamepads);
 #if defined(CONFIG_EN_USB_HOST)
+    #if defined(CONFIG_OGXM_USB_DEVICE_ONLY)
+    WiredHost::initialize(_gamepads);
+    #else
     HostManager::get_instance().initialize(_gamepads);
+    #endif
 #endif
 #if defined(CONFIG_OGXM_NETWORK)
     RemoteControl::begin(_gamepads[0], user_settings.get_current_driver());
@@ -501,8 +508,8 @@ void pico_w::initialize() {
 
 void pico_w::run() {
 #if defined(CONFIG_OGXM_USB_DEVICE_ONLY)
-    // The on-board connector is exclusively the console/PC USB device output.
-    // Core1 owns Bluetooth and Wi-Fi; no external host GPIOs are initialized.
+    // Native USB is the console/PC output. Optional GP9/GP10 PIO host
+    // is serviced from Core0; Core1 retains Bluetooth and Wi-Fi.
     DeviceDriver* device_driver = DeviceManager::get_instance().get_driver();
 #if defined(CONFIG_OGXM_NETWORK)
     s_network_mode = true;
@@ -519,6 +526,9 @@ void pico_w::run() {
         DeviceServices::tick(to_ms_since_boot(get_absolute_time()), tud_mounted(), bluepad32::any_connected());
 #endif
         tud_task();
+#if defined(CONFIG_EN_USB_HOST)
+        WiredHost::poll();
+#endif
         for (uint8_t i = 0; i < MAX_GAMEPADS; ++i) {
 #if defined(CONFIG_OGXM_NETWORK)
             Gamepad& output = i == 0 ? RemoteControl::output_gamepad(_gamepads[i]) : _gamepads[i];

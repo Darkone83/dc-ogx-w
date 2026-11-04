@@ -15,12 +15,27 @@ set(sdkVersion 2.3.0)
 set(toolchainVersion 15_2_Rel1)
 set(picotoolVersion 2.3.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
-if (EXISTS ${picoVscode})
-    include(${picoVscode})
+if(EXISTS "${picoVscode}")
+    # Load the extension tool hints even when PICO_SDK_PATH was provided by VS Code.
+    # That extension supplies the matching Windows-host pioasm package directory.
+    include("${picoVscode}")
 endif()
 # ====================================================================================
 
-set(PICO_BOARD pico_w_2023 CACHE STRING "Board type")
+# The SDK needs a WINDOWS-native pioasm tool, not arm-none-eabi-g++.
+# If the extension's hint wasn't loaded, discover its standard SDK-matched install.
+# Only select a directory containing an actual CMake package configuration.
+# Leaving pioasm_DIR unset allows the Pico SDK's normal native-tool fallback.
+if(WIN32 AND NOT pioasm_DIR)
+    set(_dc_ogx_pioasm_candidate "${USERHOME}/.pico-sdk/tools/${sdkVersion}/pioasm")
+    if(EXISTS "${_dc_ogx_pioasm_candidate}/pioasmConfig.cmake" OR
+       EXISTS "${_dc_ogx_pioasm_candidate}/pioasm-config.cmake")
+        set(pioasm_DIR "${_dc_ogx_pioasm_candidate}" CACHE PATH
+            "Matching prebuilt Windows pioasm for Pico SDK ${sdkVersion}")
+    endif()
+endif()
+
+set(PICO_BOARD pico_w CACHE STRING "Board type")
 set_property(CACHE PICO_BOARD PROPERTY STRINGS pico_w_2023 pico_w)
 if(NOT PICO_BOARD STREQUAL "pico_w" AND NOT PICO_BOARD STREQUAL "pico_w_2023")
     message(FATAL_ERROR "Supported boards are pico_w_2023 (ESP8285) and pico_w (official CYW43439)")
@@ -41,6 +56,28 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# A Pico W image must fit in a 1000 KiB staging slot, even though the board
+# has 2 MiB of flash. GCC/CMake Release normally builds with -O3 (speed),
+# which is unnecessarily expensive for the Bluetooth + Wi-Fi firmware.
+# Change ONLY Release optimization to -Os, for the app, SDK and dependencies.
+# Keep Debug as-is and leave the linker and OTA storage boundaries unchanged.
+option(DC_OGX_SIZE_OPTIMIZED_RELEASE
+       "Optimize release firmware for flash footprint instead of maximum speed" ON)
+if(DC_OGX_SIZE_OPTIMIZED_RELEASE AND CMAKE_BUILD_TYPE STREQUAL "Release"
+        AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    foreach(_lang C CXX)
+        set(_flag_name "CMAKE_${_lang}_FLAGS_RELEASE")
+        set(_original_flags "${${_flag_name}}")
+        string(REPLACE "-O3" "-Os" _size_flags "${_original_flags}")
+        if(_size_flags STREQUAL _original_flags AND
+           NOT _size_flags MATCHES "(^| )-Os( |$)")
+            string(APPEND _size_flags " -Os")
+        endif()
+        set(${_flag_name} "${_size_flags}")
+    endforeach()
+    message(STATUS "dc-ogx-w: size-optimized Release (-Os), 1000 KiB OTA slot unchanged")
+endif()
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Git REQUIRED)
 set(DC_OGX_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -56,6 +93,16 @@ if(DC_OGX_HAS_BLUETOOTH)
 endif()
 set(PICO_TINYUSB_PATH "${tinyusb_SOURCE_DIR}")
 pico_sdk_init()
+if(DC_OGX_USB_HOST_ENABLED)
+    # Some SDK/TinyUSB versions register this target before pico_sdk_init;
+    # others only expose the function after SDK initialization.
+    if(COMMAND check_and_add_pico_pio_usb_support)
+        check_and_add_pico_pio_usb_support()
+    endif()
+    if(NOT TARGET tinyusb_pico_pio_usb)
+        message(FATAL_ERROR "TinyUSB PIO USB host target unavailable; check Pico SDK, TinyUSB fork and PICO_PIO_USB_PATH")
+    endif()
+endif()
 if(DC_OGX_HAS_BLUETOOTH)
     include(cmake/sdk_compat.cmake)
 endif()
@@ -111,6 +158,9 @@ target_link_libraries(dc-ogx-w PRIVATE
     tinyusb_device tinyusb_board
     libfixmath
 )
+if(DC_OGX_USB_HOST_ENABLED)
+    target_link_libraries(dc-ogx-w PRIVATE tinyusb_host tinyusb_pico_pio_usb)
+endif()
 
 include(cmake/generated.cmake)
 pico_generate_pio_header(dc-ogx-w "${DC_OGX_SRC}/Board/Pico_WS2812/WS2812.pio")

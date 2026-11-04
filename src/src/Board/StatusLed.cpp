@@ -44,9 +44,13 @@ void initialize() {
     LedSettings::initialize();
 #if OGXM_STATUS_LED_ENABLED
     if (initialized.load(std::memory_order_acquire)) return;
-    // Claim a free state machine/program, rather than taking a fixed SM used
-    // by the official board's CYW43 driver. Prefer PIO1 and leave PIO0 free.
+    // PIO USB uses PIO0 SM0/1/2. Prefer the otherwise independent PIO1
+    // for WS2812, and never fall back to the USB-owned PIO0 when host enabled.
+#if defined(CONFIG_EN_USB_HOST)
+    for (PIO candidate : {pio1}) {
+#else
     for (PIO candidate : {pio1, pio0}) {
+#endif
         if (!pio_can_add_program(candidate, &ws2812_program)) continue;
         const int sm = pio_claim_unused_sm(candidate, false);
         if (sm < 0) continue;

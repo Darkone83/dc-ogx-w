@@ -1,6 +1,6 @@
 # Embedded WebUI and appearance
 
-The WebUI is the single embedded, fully offline HTML document [`src/NetworkService/web/index.html`](../src/NetworkService/web/index.html). It is compressed and embedded into RP2040 firmware by `src/NetworkService/embed_web.py`. The ESP8285 AT path is sensitive to simultaneous requests, so **do not** add remote fonts, CDNs, icon requests, or additional live status polling for appearance.
+The WebUI is the single embedded, fully offline HTML document [`src/src/NetworkService/web/index.html`](../src/src/NetworkService/web/index.html). It is compressed and embedded into RP2040 firmware by `src/src/NetworkService/embed_web.py`. The ESP8285 AT path is sensitive to simultaneous requests, so **do not** add remote fonts, CDNs, icon requests, or additional live status polling for appearance.
 
 ## Navigation
 
@@ -31,6 +31,6 @@ This feature is intentionally local to prevent additional ESP8285 AT traffic. Ph
 
 ## Testing and constraints
 
-Run `python tests/web/test_branding.py` to verify required IDs, themes, inline assets and embedded size. With Playwright and Chromium installed, run `python tests/web/test_layout.py` for desktop/mobile behavior using mocked device APIs and a synthetic locally connected controller. The browser test uses an opaque origin, so it does **not** prove localStorage survival across separate launches. Confirm that on physical hardware.
+This trimmed distribution excludes standalone browser test harnesses. Verify the navigation and all eight themes in desktop and narrow/mobile browsers on the actual adapter. The browser Gamepad API preview needs a gamepad connected to the browser host; this does not establish console-side input telemetry.
 
 Keep user feedback next to the setting being edited. Preserve keyboard focus, touch targets, controller controls and mobile responsiveness. Never make UI theming depend on an unverified server response.

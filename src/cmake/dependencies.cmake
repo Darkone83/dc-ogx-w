@@ -28,6 +28,21 @@ dc_ogx_fetch(tinyusb https://github.com/MegaCadeDev/tinyusb.git
 dc_ogx_fetch(libfixmath https://github.com/PetteriAimonen/libfixmath.git
     d308e466e1a09118d03f677c52e5fbf402f6fdd0 CMakeLists.txt)
 
+if(DC_OGX_USB_HOST_ENABLED)
+    # Use the locally installed PIO-USB checkout if supplied; otherwise fetch it.
+    # The experimental build currently follows upstream main. Pin to the exact
+    # working commit once verified with the user's Pico SDK/TinyUSB fork.
+    if(PICO_PIO_USB_PATH)
+        if(NOT EXISTS "${PICO_PIO_USB_PATH}/src/pio_usb.c")
+            message(FATAL_ERROR "PICO_PIO_USB_PATH must contain src/pio_usb.c")
+        endif()
+    else()
+        dc_ogx_fetch(pio_usb https://github.com/wiredopposite/Pico-PIO-USB.git
+            main src/pio_usb.c)
+        set(PICO_PIO_USB_PATH "${pio_usb_SOURCE_DIR}")
+    endif()
+endif()
+
 function(dc_ogx_apply_patch source patch)
     execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check --ignore-whitespace "${patch}"
                     WORKING_DIRECTORY "${source}" RESULT_VARIABLE _can_apply

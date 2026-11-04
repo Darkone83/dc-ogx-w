@@ -1,123 +1,78 @@
 # DC-OGX-W
 
 <div align="center">
-  <img src="assets/branding/repo-banner.jpg" alt="DC-OGX-W — DarkoneCustoms OGX Remote Adapter" width="900" />
+  <img src="assets/branding/repo-banner.jpg" alt="DC-OGX-W by Darkone Customs" width="900" />
 </div>
 
-**A wireless, RP2040-based controller adapter with an on-device WebUI, configurable profiles, Wi-Fi input, and optional OLED status display.** Built under **DarkoneCustoms / Darkone83**, on the OGX-Mini controller foundation.
+**An RP2040-based controller adapter for the original Xbox and compatible USB output modes.** DC-OGX-W combines a self-hosted WebUI, Wi-Fi remote input, controller profiles, an optional 0.91-inch OLED, and an RGB status LED. The project builds on OGX-Mini and is maintained by **Darkone83 / Darkone Customs**.
 
-**Source version:** 0.2.4 · **Project stage:** development and hardware validation · **Target:** original Xbox and other supported USB device output modes. This repository is source-first; do not assume a prebuilt UF2 is included.
+**Firmware source version:** `0.2.4` in this snapshot. **Stage:** active development and hardware validation. The bundled firmware images are snapshots, not proof that every current source patch has been migrated or tested on your hardware.
 
-## What it does
+## Repository layout
 
-- **Play through the adapter:** Use a browser, **reassignable keyboard controls**, on-screen gamepad, or PC gamepad to send controller input over Wi-Fi to the RP2040's built-in USB output.
-- **Profiles and calibration:** Configure button mapping, analog axes, dead zones, and saved profiles in the WebUI. Bluetooth-capable boards also expose physical controller configuration.
-- **Self-hosted WebUI:** A responsive desktop sidebar and mobile menu; eight browser-local themes; the Profiles editor includes a live stick/trigger response preview when a gamepad is connected to the computer running the WebUI. No cloud service or external assets.
-- **OLED status display:** Optional 0.91-inch 128×32 SSD1306 on I²C1 shows the DXC splash, IP/profile/network state, reusable icons, operation animations and update progress. **Device → OLED display** now supports live brightness, dim/off timeouts, idle brightness, inversion, flip, startup fade, and persistent preferences.
-- **Status LED:** Optional WS2812 on GP8 for profile and diagnostic indications.
-- **Firmware updating:** Upload a board-specific `.ogxw` image through the WebUI after the first UF2 installation; the updater validates before installation.
-- **Home network joining:** Configure 2.4 GHz station credentials. SoftAP is used for first-time setup and while joining, then automatically switches off once home Wi-Fi has a confirmed IP. It returns as a recovery network after a sustained home-network loss; active users must access the WebUI using the home-network IP or `.local` name. Wi-Fi behavior depends on the radio/firmware installed in your board.
-
-## Hardware
-
-| Board | Firmware preset | Wireless input | USB output |
-|---|---|---|---|
-| RP2040 Pico W-2023 clone **with ESP8285** | `pico-w-2023` | Wi-Fi through ESP8285 AT firmware; **no Bluetooth** | Board's built-in USB connector |
-| Official Raspberry Pi Pico W (CYW43439) | `pico-w` | Native Wi-Fi and supported Bluetooth controllers | Board's built-in USB connector |
-
-Both boards retain the same RP2040-facing accessory pins:
-
-| Accessory | Pins | Notes |
-|---|---|---|
-| ESP8285 AT modem (clone only) | **GP0 TX / GP1 RX** | UART0 at base 115200 baud; firmware negotiates faster volatile rates when supported |
-| WS2812 status LED | **GP8** | One external LED, configurable and optional |
-| SSD1306 OLED | **GP14 SDA / GP15 SCL** | I²C1, **128×32**, address 0x3C; 3.3 V module |
-| Proposed USB controller input (future hardware) | **GP9 D+ / GP10 D−** | PIO-USB host candidate; **not enabled in this firmware** |
-
-The OLED is optional. Without a connected panel, device operation continues; display probing is bounded. GP14/GP15 must remain free for I²C. The current hardware build is **not** an Xbox-side HDMI, Ethernet, or USB-host interface. A future USB-A host input on GP9/GP10 is planned for the candybar PCB; USB output remains on the RP2040 native USB connector. Host input is a translated controller source, **not** electrical USB passthrough.
-
-## Getting started
-
-1. Install the **Raspberry Pi Pico** VS Code extension, Pico SDK **2.3.0**, Arm toolchain, CMake, Ninja, Python, and Git. Open this repository folder in VS Code.
-2. Choose your actual hardware preset. Do **not** switch the hardware in an already-configured build directory.
-3. Configure and compile in a Pico SDK terminal:
-
-   **Pico W-2023 / ESP8285:**
-
-   ```cmd
-   cmake --preset pico-w-2023 && cmake --build --preset pico-w-2023 --parallel
-   ```
-
-   **Official Pico W:**
-
-   ```cmd
-   cmake --preset pico-w && cmake --build --preset pico-w --parallel
-   ```
-
-4. With the RP2040 in **BOOTSEL**, copy the appropriate `build/<preset>/dc-ogx-w.uf2` to the RP2040 boot drive. The clone's separate ESP boot/DOOT button is **not** used for RP2040 UF2 installation.
-5. Join the adapter's SoftAP **`dc-ogx-w-XXXX`** with the default password **`ogxremote`**, then open **http://192.168.4.1/**.
-6. In the WebUI, choose an input source, connect, adjust profiles, and optionally join your home 2.4 GHz Wi-Fi network.
-
-**Note for ESP8285 clones:** The RP2040 build does **not** update ESP8285 AT firmware. The legacy AT 1.6.x firmware may not provide reliable `.local` mDNS resolution. Use the IP displayed on the OLED or WebUI. The adapter still works without hostname resolution.
-
-## WebUI and themes
-
-The embedded WebUI retains the existing **Control**, **Profiles**, **Wi-Fi**, **LED**, and **Device** functions. Desktop now uses persistent left navigation; a compact menu drawer handles narrow mobile viewports without hiding essential controls. The old redundant "Controller Workbench" heading is gone.
-
-**Eight selectable themes** are available: Darkone Green, Theia-inspired Dark, Midnight Blue, Synthwave, Ember, Retro Terminal, Theia-inspired Light, and Arctic Light. Their differences include typography, density, corners and surfaces as well as colors. Theme choice is stored in this **browser's** local storage: changing browsers/devices does not synchronize the preference to adapter flash.
-
-**Profile deadzone/curve preview:** The Profiles tab now includes two live stick plots and trigger bars beside the tuning workflow. When a USB/Bluetooth gamepad is connected to the computer or phone *running the browser* and the browser Gamepad API exposes it, raw input is visualized alongside the **approximate** output from the editable deadzone, curve, and inversion values. This is a **local preview**, not the device's measured output and not an exact emulation of every hardware profile-shaping behavior. It adds no ESP8285 traffic. Actual adapter-side USB/BT input telemetry remains future work.
-
-<div align="center">
-  <img src="assets/branding/web-framework-desktop.png" alt="Desktop Profiles editor with sidebar and live-response visualization" width="680" />
-</div>
-
-**Keyboard mapping:** Under **Control → Keyboard mapping**, click any button or direction assignment, then press the new key. All face/menu/shoulder/trigger/D-pad controls, both stick direction sets, and Guide are reassignable. If a key is already assigned, the two actions swap keys rather than creating duplicates. Use **Reset keys** to restore defaults. **F8** takes/releases control; **Esc** cancels a pending assignment or releases control. Held inputs are cleared when changing bindings or losing browser focus. Keyboard assignments use browser `localStorage` and are **not** console profile mappings; they do not move between browsers. Browser/system shortcut chords and F8/Esc are reserved.
-
-All page assets remain embedded and offline-capable. For detailed palettes and design notes, see [WebUI themes](docs/WEBUI_THEMES.md) and [shared software framework](docs/SW_FRAMEWORK.md).
-
-## 0.91-inch OLED
-
-The SSD1306 displays the **DXC monochrome splash** briefly after startup, then rotates through IP, profile and network pages. It now uses reusable 16×16 operation glyphs and gently animated status dots. An accepted profile or settings operation temporarily replaces the normal view with a load/apply/save notice. Firmware receiving, install, ready and error take priority, with upload progress rounded to reduce I²C traffic. Details: [OLED interface](docs/OLED_UI.md).
-
-The panel size for both presets is **128×32**. **Device → OLED display** provides brightness/contrast (0–255), idle brightness, selectable dim and display-off timeouts (Never, 30 s to 1 hour), enable, invert, 180° flip and startup fade. **Apply now** changes the running display without writing flash; **Save and restart** persists the current form values in the adapter's independent `oled-v1` NVS record. **Defaults** selects the firmware's compiled defaults, then still requires Apply or Save. On first boot without saved settings, CMake `DC_OGX_OLED_CONTRAST`, `DC_OGX_OLED_FADE_ENABLED`, `DC_OGX_OLED_IDLE_DIM_MS` and `DC_OGX_OLED_IDLE_CONTRAST` determine initial values. Screen-off issues the SSD1306 `0xAE` command, not a physical module power cut; meaningful activity wakes it. Missing OLED hardware does not prevent device boot. Its physical viewable area is small, so screens avoid dense text. **OLED screens and brightness behavior require physical panel validation.**
-
-## Firmware updates and recovery
-
-The first firmware installation uses **BOOTSEL + UF2**. Later updates use the **Device → Firmware update** flow and the appropriate checked `.ogxw` file generated with the build. Keep power connected for final installation. **There is no automatic A/B rollback** if power is interrupted during the final flash copy; recovery may require BOOTSEL.
-
-The WebUI updater only changes RP2040 firmware, not ESP8285 AT firmware. Consult [updater documentation](tools/firmware/README.md) before flashing. The ESP diagnostics application under `tools/esp8285` is a separate maintenance utility, not the adapter firmware.
-
-## Project layout
-
-| Path | Content |
+| Path | Contents |
 |---|---|
-| `src/` | Board drivers, networking, controller services, OLED, firmware updater, embedded WebUI |
-| `boards/`, `cmake/`, `CMakePresets.json` | RP2040 board targets and build configuration |
-| `assets/branding/` | Individually split logo assets, monochrome OLED mark, splash image and theme previews |
-| `tests/` | Native transport, HTTP, LED, OLED, updater and protocol tests |
-| `tools/pc/` | Browser/Python bridge tools for development and PC input |
-| `tools/firmware/` | Update package format and packager |
-| `docs/` | Technical detail, branding guidance, display/UI notes, future controller protocol |
-| `.github/` | Issue templates, pull request template, host-test CI |
+| [`src/`](src/) | **Firmware project root**: `CMakeLists.txt`, `CMakePresets.json`, `boards/`, `cmake/`, `src/` C++ source, embedded WebUI and runtime assets |
+| [`firmware/`](firmware/) | Supplied `.uf2` and board-specific `.ogxw` files for both variants; verify versions before release |
+| [`apps/Windows/bin/`](apps/Windows/bin/) | Supplied portable Windows companion executable |
+| [`apps/Windows/src/`](apps/Windows/src/) | Tauri 2 / Rust Windows companion source and build configuration |
+| [`apps/Python/`](apps/Python/) | Python remote and PySide6 GUI for Windows, Linux and macOS, with dependency bootstrap launchers |
+| [`PCB/`](PCB/) | Board fabrication ZIP, schematic, BOM, pick-and-place and layout images |
+| [`STL/`](STL/) | Two-piece printable enclosure (lid and base) |
+| [`assets/branding/`](assets/branding/) | Logos, WebUI theme references, splash, display assets and product art |
+| [`docs/`](docs/) | Build instructions, API, software architecture, OLED, USB-host bring-up and release checks |
 
-## Current limitations and planned work
+This cleaned distribution omits development test suites and obsolete patch-session notes; **it does not delete firmware or desktop source code**. The original upload remains available separately for historical tests. See [cleanup manifest](docs/CLEANUP_MANIFEST.md).
 
-- The **ESP8285** Wi-Fi implementation shares an AT UART command engine with HTTP/control traffic. Reconnection and timeouts have been improved, but uninterrupted Wi-Fi cannot be guaranteed by software alone. The ESP8285 clone does not currently enable UDP discovery.
-- Native UDP discovery exists for the **official Pico W**. The separate Windows companion app, exclusive low-latency UDP input session, Bluetooth handoff and feedback transport remain **future work**, not currently supported controls.
-- Optional PIO-USB **host input on GP9/GP10 is planned, not implemented**. The CMake flag `DC_OGX_USB_HOST_ENABLED` intentionally fails if enabled; only the pin mapping is staged. Hardware design/verification is separate.
-- Performance figures and radio compatibility must be validated on real hardware and host consoles. The repo includes native host tests; it is not a substitute for hardware QA.
+## Supported boards
 
-See [roadmap and protocol notes](docs/oled-udp-foundation.md), [planned USB host integration](docs/USB_HOST_SOFTWARE_PLAN.md), and [development notes](docs/DEVELOPMENT_NOTES.md).
+| Board | CMake preset | Network hardware | Controller sources |
+|---|---|---|---|
+| Pico W-2023 clone | `pico-w-2023` | Onboard ESP8285, UART0 GP0/GP1, existing legacy AT firmware | Wi-Fi WebUI and desktop remote; no ESP Bluetooth |
+| Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers |
 
-## Contributing and reporting issues
+Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for optional PIO-USB **host input**. Host input is translated controller data, not electrical USB passthrough.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, test commands, and pull-request expectations. Use a GitHub issue to report a reproducible problem; include which board and firmware were tested. For security-sensitive reports, read [SECURITY.md](SECURITY.md).
+**PIO-USB build status:** A later CMake integration patch has compiled successfully on the maintainer's Pico W-2023 environment. **The uploaded ZIP predates that CMake merge**: its `src/cmake/options.cmake` still disables USB host and rejects enabling it, and its presets do not include the PIO variants. Transfer the proven local CMake changes before selecting PIO-USB for a release. Successful compilation does **not** establish controller enumeration or hardware safety. See [USB host bring-up](docs/USB_HOST.md).
 
-## Credits and licenses
+## Build firmware
 
-DC-OGX-W development, product design, WebUI and branding: **Darkone83 / DarkoneCustoms**.
+Install the Raspberry Pi Pico VS Code extension with **Pico SDK 2.3.0**, ARM toolchain, CMake, Ninja, Python 3 and Git. Open **`src/` as the firmware project** (or point the extension directly at its `CMakeLists.txt`). Normal compilation should work from VS Code's **Compile** action after a one-time environment configuration.
 
-The controller implementation derives from [MegaCadeDev/OGX-Mini-2026](https://github.com/MegaCadeDev/OGX-Mini-2026), which builds on [wiredopposite/OGX-Mini](https://github.com/wiredopposite/OGX-Mini). This source package retains upstream copyright and license notices. Additional acknowledgments, individual dependencies and license considerations (including Bluepad32, BTstack, TinyUSB, libxsm3 and its ExCrypt component) are documented in [CREDITS.md](CREDITS.md) and [LICENSE](LICENSE).
+From a terminal in `src/`:
 
-*Unofficial original Xbox community project; not affiliated with or endorsed by Microsoft.*
+```powershell
+cmake --preset pico-w-2023
+cmake --build --preset pico-w-2023 --parallel
+```
+
+For the official Pico W use `pico-w` in both commands. The presets maintain separate build directories. Generated files should appear below `src/build/<preset>/` and include `dc-ogx-w.uf2` and `dc-ogx-w-<board>.ogxw` on successful packaging.
+
+**Firmware packager path:** `src/tools/firmware/make_update.py` (path relative to the **repository**). The CMake post-build step references `tools/firmware/make_update.py` relative to the firmware project root. The original uploaded ZIP did not contain that utility; the maintainer is adding it locally. Verify it is at exactly this nested location, not at `src/make_update.py`, before releasing a source archive. The cleanup has **not** fabricated or restored a historical packager copy.
+
+First flash: put the RP2040 into **BOOTSEL** mode and copy the correct board's UF2 to the RP2040 mass-storage drive. Later firmware updates use the WebUI's `.ogxw` updater. That updater does **not** update the ESP8285's installed AT firmware. An interrupted final flash copy may require BOOTSEL recovery—there is no automatic A/B rollback. See [build and flashing](docs/BUILD_AND_FLASH.md).
+
+## WebUI and connected input
+
+Connect to the adapter's SoftAP, usually `dc-ogx-w-XXXX`, with password `ogxremote`, then visit `http://192.168.4.1/`. If the device is on your home network, use the assigned LAN IP. AP-to-station behavior and UDP discovery depend on the firmware and radio variant; don't assume newer unmerged patches are in the prebuilt images.
+
+The embedded UI includes **Control, Profiles, Wi-Fi, LED and Device**, desktop sidebar/mobile drawer, eight appearance themes, remappable keyboard controls (including original Xbox White and Black), device profiles/calibration, OLED configuration, and firmware updating. The browser-based gamepad preview is a **local approximation**, not measured controller output. UI assets are embedded without a CDN. See [WebUI themes](docs/WEBUI_THEMES.md), [OLED UI](docs/OLED_UI.md), and [remote API](docs/remote-api.md).
+
+## Desktop companions
+
+**Windows:** run the supplied [`apps/Windows/bin/dc-ogx-w.exe`](apps/Windows/bin/dc-ogx-w.exe) or build the portable Tauri/Rust app from [`apps/Windows/src/`](apps/Windows/src/). It uses the adapter's HTTP/WebSocket control APIs, supports keyboard/XInput input, controller White/Black buttons, settings, profiles and discovery when supported by firmware. Full advanced profile editing and firmware upload remain in the device WebUI. The binary in this archive has **not** been independently verified against the latest source patch.
+
+**Linux/macOS (also Windows):** use [`apps/Python/start-remote.sh`](apps/Python/start-remote.sh), `start-remote.command` on macOS or `start-remote.cmd` on Windows. The Python launcher creates a private `.venv-ogx` and installs missing `aiohttp`, PySide6 and pygame packages at first launch (internet required). See [companion apps](docs/COMPANION_APPS.md).
+
+## Hardware and release status
+
+The 0.91-inch SSD1306 display is **128×32**, connected over I²C1. The WebUI supports contrast, idle dim/off, inversion, rotation and startup fade; brightness and animated presentation have been iterated on physical hardware. The two-part enclosure has **STL files** for FDM printing; allow for connector/module variants and perform a physical fit check.
+
+The legacy ESP8285 AT transport, Core0 mailbox scheduling, UDP discovery and wired PIO host have undergone multiple revisions. **A successful build or simulator result is not proof of a stable long-duration play session.** Before publishing firmware, validate Wi-Fi stability, controller neutralization/release, input lag, updater behavior, PIO-USB enumeration and USB host VBUS protection on the actual board. See [release checklist](docs/RELEASE_CHECKLIST.md).
+
+## Project information
+
+- [Contribution guidelines](CONTRIBUTING.md) · [Security](SECURITY.md) · [Credits and third-party notices](CREDITS.md) · [License](LICENSE)
+- [Software architecture](docs/SW_FRAMEWORK.md) · [USB host](docs/USB_HOST.md) · [API](docs/remote-api.md)
+
+**Attribution:** Darkone83 / Darkone Customs; derived from [MegaCadeDev/OGX-Mini-2026](https://github.com/MegaCadeDev/OGX-Mini-2026) and [wiredopposite/OGX-Mini](https://github.com/wiredopposite/OGX-Mini). Preserve all applicable upstream licenses and notices.

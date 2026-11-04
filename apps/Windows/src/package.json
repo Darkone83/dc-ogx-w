@@ -5,8 +5,9 @@
   "description": "Portable Windows companion for DC-OGX-W",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build --no-bundle",
-    "check:ui": "node tests/check-ui.cjs"
+    "build": "tauri build --no-bundle"
   },
-  "devDependencies": { "@tauri-apps/cli": "^2.0.0" }
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
 }

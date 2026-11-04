@@ -49,14 +49,19 @@
 #elif defined(CONFIG_OGXM_BOARD_PI_PICOW) || defined(CONFIG_OGXM_BOARD_PI_PICO2W)
     #define OGXM_BOARD          PI_PICOW
     // PIO USB host for external port (e.g. Wii mode: controller on USB, BT for Wiimote)
-    #define PIO_USB_DP_PIN      0  // D+ = GP0, D- = GP1
+    #if defined(CONFIG_EN_USB_HOST)
+        #define PIO_USB_DP_PIN 9  // D+ GP9, D- GP10 (DC-OGX-W carrier PCB)
+    #endif
     #ifndef PIO_USB_SWAP_DP_DM
     #define PIO_USB_SWAP_DP_DM  0  // set 1 if controller powers but does not enumerate
     #endif
 
 #elif defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     #define OGXM_BOARD          PI_PICOW_2023
-    // GP0/GP1 connect to the onboard ESP8285. USB uses the built-in connector.
+    // GP0/GP1 connect to the onboard ESP8285. Native USB remains device output.
+    #if defined(CONFIG_EN_USB_HOST)
+        #define PIO_USB_DP_PIN 9  // D+ GP9, D- GP10 (DC-OGX-W carrier PCB)
+    #endif
     #ifndef OGXM_ESP_UART_ID
     #define OGXM_ESP_UART_ID     0
     #endif

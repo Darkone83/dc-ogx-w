@@ -1122,7 +1122,12 @@ void complete_core_requests() {
                     reinterpret_cast<const uint8_t*>(client.core_reply), result.length);
                 client.last_ack = now_ms();
             }
-            if (!client.response_pending && client.rx_length) process_websocket(client);
+            // Core0 may have completed a frame while more TCP bytes arrived.
+            // The stream must advance even if an earlier low-rate ACK is still
+            // queued for transmission; outstanding output is not input flow
+            // control, and otherwise buffered frames can remain stuck forever.
+            if (client.rx_length && !client.closing && !client.transport_closing)
+                process_websocket(client);
         } else {
             // Preserve the existing response, notification and deferred-save
             // semantics after the request has been consumed exactly once.
@@ -1176,7 +1181,13 @@ void on_receive(Transport::Handle handle, const uint8_t *bytes, size_t length) {
         return;
     client->last_activity = now_ms();
 #if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-    if (client->core_pending) return;
+    // A Core0 RPC owns the current request, but incoming WebSocket bytes are
+    // still part of a continuous TCP stream. Do not discard them: the next
+    // frame may arrive (or be split across UART callbacks) before completion.
+    // Core0 copies WebSocket JSON into its own fixed slot, so appending later
+    // bytes does not mutate a buffer borrowed by Core0. HTTP bodies, in
+    // contrast, are borrowed from client.rx and must remain untouched.
+    if (client->core_pending && !client->websocket) return;
 #endif
     if (client->closing || client->close_after_send ||
         (!client->websocket && (client->response_pending || client->dispatch_deferred)))
@@ -1200,8 +1211,13 @@ void on_receive(Transport::Handle handle, const uint8_t *bytes, size_t length) {
     client->rx_length += length;
     client->rx[client->rx_length] = 0;
     if (client->websocket) {
-        if (!client->upgrade_pending && !client->dispatch_deferred)
-            process_websocket(*client);
+        // Leave all parsing/consumption until Core0 completes the request
+        // pinned at the front of rx. Received bytes remain buffered in order.
+        if (!client->upgrade_pending && !client->dispatch_deferred
+#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
+            && !client->core_pending
+#endif
+        ) process_websocket(*client);
     } else {
         WebProtocol::Request request;
         const auto parsed = WebProtocol::parse_request(client->rx, client->rx_length, request);
