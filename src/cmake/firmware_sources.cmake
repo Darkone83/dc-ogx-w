@@ -1,0 +1,77 @@
+# USB, settings and remote-input implementation shared by both RP2040 boards.
+set(DC_OGX_FIRMWARE_SOURCES
+    src/main.cpp
+    src/OGXMini/OGXMini.cpp
+    src/TaskQueue/TaskQueue.cpp
+    src/DeviceServices/DeviceServices.cpp
+    src/Display/OledDisplay.cpp
+    src/Display/OledSettings.cpp
+    src/NetworkService/DiscoveryProtocol.cpp
+    src/FirmwareUpdate/FirmwareUpdate.cpp
+    src/FirmwareUpdate/Rp2040Flash.cpp
+    src/FirmwareUpdate/UpdateImage.cpp
+    src/Input/InputSlot.cpp
+    src/Board/ogxm_log.cpp
+    src/Board/esp32_api.cpp
+    src/Board/board_api.cpp
+    src/Board/StatusLed.cpp
+    src/Board/StatusLedPolicy.cpp
+    src/Board/LedSettings.cpp
+    src/Board/board_api_private/board_api_led.cpp
+    src/Board/board_api_private/board_api_rgb.cpp
+    src/Board/board_api_private/board_api_usbh.cpp
+    src/UserSettings/UserSettings.cpp
+    src/UserSettings/UserProfile.cpp
+    src/UserSettings/JoystickSettings.cpp
+    src/UserSettings/TriggerSettings.cpp
+    src/USBDevice/tud_callbacks.cpp
+    src/USBDevice/DeviceManager.cpp
+    src/USBDevice/DeviceDriver/DeviceDriver.cpp
+    src/USBDevice/DeviceDriver/PSClassic/PSClassic.cpp
+    src/USBDevice/DeviceDriver/PS3/PS3.cpp
+    src/USBDevice/DeviceDriver/PS4/PS4.cpp
+    src/USBDevice/DeviceDriver/Steam/Steam.cpp
+    src/USBDevice/DeviceDriver/Steam/SteamTouchpad.cpp
+    src/USBDevice/DeviceDriver/Switch/Switch.cpp
+    src/USBDevice/DeviceDriver/WiiU/WiiU.cpp
+    src/USBDevice/DeviceDriver/XInput/XInput.cpp
+    src/USBDevice/DeviceDriver/XboxOG/XboxOG_GP.cpp
+    src/USBDevice/DeviceDriver/XboxOG/XboxOG_SB.cpp
+    src/USBDevice/DeviceDriver/XboxOG/XboxOG_XR.cpp
+    src/USBDevice/DeviceDriver/DInput/DInput.cpp
+    src/USBDevice/DeviceDriver/WebApp/WebApp.cpp
+    src/USBDevice/DeviceDriver/XInput/tud_xinput/tud_xinput.cpp
+    src/USBDevice/DeviceDriver/XboxOG/tud_xid/tud_xid.cpp
+    src/NetworkService/NetworkService.cpp
+    src/NetworkService/NetworkSettings.cpp
+    src/NetworkService/WifiScan.cpp
+    src/NetworkService/WebProtocol.cpp
+    src/RemoteControl/Json.cpp
+    src/RemoteControl/Protocol.cpp
+    src/RemoteControl/Profile.cpp
+    src/RemoteControl/RemoteControl.cpp
+)
+
+if(DC_OGX_HAS_BLUETOOTH)
+    list(APPEND DC_OGX_FIRMWARE_SOURCES
+        src/OGXMini/Board/PicoW.cpp
+        src/Board/board_api_private/board_api_bt.cpp
+        src/NetworkService/Cyw43Transport.cpp
+        src/NetworkService/UdpDiscovery.cpp
+        src/NetworkService/dhcpserver.c
+        src/Bluepad32/Bluepad32.cpp
+        src/Bluepad32/ClassicPairingDebug.cpp
+        src/BLEServer/BLEServer.cpp
+        src/USBHost/HostDriver/FlydigiApex4Wukong/FlydigiApex4WukongBtProbe.cpp
+        src/USBHost/HostDriver/FlydigiApex4Wukong/FlydigiApex4WukongBt.cpp
+        src/USBHost/HostDriver/FlydigiApex4Wukong/FlydigiApex4WukongBtL2cap.cpp
+        src/USBHost/HostDriver/GameSirCyclone2/Cyclone2BtProbe.cpp
+        src/USBHost/HostDriver/GameSirG7Pro/GameSirG7ProBt.cpp
+    )
+else()
+    list(APPEND DC_OGX_FIRMWARE_SOURCES
+        src/OGXMini/Board/PicoW2023.cpp
+        src/NetworkService/EspAtProtocol.cpp
+        src/NetworkService/EspAtTransport.cpp
+    )
+endif()

@@ -1,0 +1,46 @@
+{
+    "version": 2,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "pico-w-2023",
+            "displayName": "Pico W-2023 (Wi-Fi input, built-in USB output)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/pico-w-2023",
+            "cacheVariables": {
+                "PICO_BOARD": "pico_w_2023",
+                "OGXM_STATUS_LED_PIN": "8",
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "DC_OGX_OLED_HEIGHT": "32"
+            }
+        },
+        {
+            "name": "pico-w",
+            "displayName": "Official Pico W (Wi-Fi/Bluetooth input, built-in USB output)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/pico-w",
+            "cacheVariables": {
+                "PICO_BOARD": "pico_w",
+                "OGXM_STATUS_LED_PIN": "8",
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "DC_OGX_OLED_HEIGHT": "32"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "pico-w-2023",
+            "configurePreset": "pico-w-2023"
+        },
+        {
+            "name": "pico-w",
+            "configurePreset": "pico-w"
+        }
+    ]
+}

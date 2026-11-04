@@ -1,0 +1,8 @@
+/* dc-ogx-w: reserve the top 16 KiB of main SRAM for two 8 KiB stacks.
+ * RAM_LENGTH is reduced to 240 KiB by cmake/generated.cmake. The physical
+ * 4 KiB scratch banks retain the SDK's normal addresses and contents. */
+MEMORY
+{
+    STACK1(rwx) : ORIGIN = 0x2003c000, LENGTH = 8k
+    STACK0(rwx) : ORIGIN = 0x2003e000, LENGTH = 8k
+}

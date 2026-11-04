@@ -1,0 +1,13 @@
+/* The SDK supplies the stack allocations; place them in dedicated regions. */
+SECTIONS
+{
+    .stack1_dummy (NOLOAD):
+    {
+        *(.stack1*)
+    } > STACK1
+
+    .stack_dummy (NOLOAD):
+    {
+        KEEP(*(.stack*))
+    } > STACK0
+}

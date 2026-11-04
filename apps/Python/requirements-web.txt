@@ -1,0 +1,2 @@
+# Browser bridge and asynchronous Python API; no desktop/SDL dependency.
+aiohttp>=3.12,<4

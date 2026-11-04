@@ -1,0 +1,18 @@
+/* Override only the stack addresses after the SDK defines its normal end
+ * symbols. Retain the SDK's heap, TLS and C-library symbols unchanged. */
+SECTIONS
+{
+    __StackOneTop = ORIGIN(STACK1) + LENGTH(STACK1);
+    __StackTop = ORIGIN(STACK0) + LENGTH(STACK0);
+    __StackOneBottom = __StackOneTop - SIZEOF(.stack1_dummy);
+    __StackBottom = __StackTop - SIZEOF(.stack_dummy);
+
+    ASSERT(ORIGIN(RAM) + LENGTH(RAM) == ORIGIN(STACK1),
+        "dc-ogx-w: RAM must end before the reserved stacks")
+    ASSERT(__HeapLimit <= ORIGIN(STACK1),
+        "dc-ogx-w: heap overlaps the reserved stacks")
+    ASSERT(SIZEOF(.stack1_dummy) == 8192 && SIZEOF(.stack_dummy) == 8192,
+        "dc-ogx-w requires an 8 KiB stack on each core")
+    ASSERT(__flash_binary_end <= ORIGIN(FLASH) + 1024000,
+        "Firmware exceeds the 1000 KiB OTA image slot")
+}

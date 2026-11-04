@@ -1,0 +1,1 @@
+Concept-only visual reference. This image was generated to explore the look and contains illustrative controls, hardware, telemetry and example versions which **do not represent actual adapter features**. Do not use it as a product screenshot or a source of configuration values. The real working WebUI screenshots are stored in the parent branding directory.

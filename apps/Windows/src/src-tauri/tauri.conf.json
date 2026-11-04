@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DC-OGX-W",
+  "version": "0.1.4",
+  "identifier": "com.darkonecustoms.dcogxw",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "appDirectoriesOverride": "./app-data",
+    "windows": [{
+      "title": "DC-OGX-W | Darkone Customs",
+      "width": 1080,
+      "height": 750,
+      "minWidth": 825,
+      "minHeight": 570,
+      "backgroundColor": "#0B1210",
+      "resizable": true
+    }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico", "icons/32x32.png", "icons/128x128.png"]
+  }
+}
