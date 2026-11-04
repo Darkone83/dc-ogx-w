@@ -22,8 +22,6 @@
 | [`assets/branding/`](assets/branding/) | Logos, WebUI theme references, splash, display assets and product art |
 | [`docs/`](docs/) | Build instructions, API, software architecture, OLED, USB-host bring-up and release checks |
 
-This cleaned distribution omits development test suites and obsolete patch-session notes; **it does not delete firmware or desktop source code**. The original upload remains available separately for historical tests. See [cleanup manifest](docs/CLEANUP_MANIFEST.md).
-
 ## Supported boards
 
 | Board | CMake preset | Network hardware | Controller sources |
@@ -32,8 +30,6 @@ This cleaned distribution omits development test suites and obsolete patch-sessi
 | Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers |
 
 Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for optional PIO-USB **host input**. Host input is translated controller data, not electrical USB passthrough.
-
-**PIO-USB build status:** A later CMake integration patch has compiled successfully on the maintainer's Pico W-2023 environment. **The uploaded ZIP predates that CMake merge**: its `src/cmake/options.cmake` still disables USB host and rejects enabling it, and its presets do not include the PIO variants. Transfer the proven local CMake changes before selecting PIO-USB for a release. Successful compilation does **not** establish controller enumeration or hardware safety. See [USB host bring-up](docs/USB_HOST.md).
 
 ## Build firmware
 
@@ -48,13 +44,13 @@ cmake --build --preset pico-w-2023 --parallel
 
 For the official Pico W use `pico-w` in both commands. The presets maintain separate build directories. Generated files should appear below `src/build/<preset>/` and include `dc-ogx-w.uf2` and `dc-ogx-w-<board>.ogxw` on successful packaging.
 
-**Firmware packager path:** `src/tools/firmware/make_update.py` (path relative to the **repository**). The CMake post-build step references `tools/firmware/make_update.py` relative to the firmware project root. The original uploaded ZIP did not contain that utility; the maintainer is adding it locally. Verify it is at exactly this nested location, not at `src/make_update.py`, before releasing a source archive. The cleanup has **not** fabricated or restored a historical packager copy.
+**Firmware packager path:** `src/tools/firmware/make_update.py` (path relative to the **repository**). The CMake post-build step references `tools/firmware/make_update.py` relative to the firmware project root.
 
 First flash: put the RP2040 into **BOOTSEL** mode and copy the correct board's UF2 to the RP2040 mass-storage drive. Later firmware updates use the WebUI's `.ogxw` updater. That updater does **not** update the ESP8285's installed AT firmware. An interrupted final flash copy may require BOOTSEL recovery—there is no automatic A/B rollback. See [build and flashing](docs/BUILD_AND_FLASH.md).
 
 ## WebUI and connected input
 
-Connect to the adapter's SoftAP, usually `dc-ogx-w-XXXX`, with password `ogxremote`, then visit `http://192.168.4.1/`. If the device is on your home network, use the assigned LAN IP. AP-to-station behavior and UDP discovery depend on the firmware and radio variant; don't assume newer unmerged patches are in the prebuilt images.
+Connect to the adapter's SoftAP, usually `dc-ogx-w-XXXX`, with password `ogxremote`, then visit `http://192.168.4.1/`. If the device is on your home network, use the assigned LAN IP. AP-to-station behavior and UDP discovery depend on the firmware and radio variant.
 
 The embedded UI includes **Control, Profiles, Wi-Fi, LED and Device**, desktop sidebar/mobile drawer, eight appearance themes, remappable keyboard controls (including original Xbox White and Black), device profiles/calibration, OLED configuration, and firmware updating. The browser-based gamepad preview is a **local approximation**, not measured controller output. UI assets are embedded without a CDN. See [WebUI themes](docs/WEBUI_THEMES.md), [OLED UI](docs/OLED_UI.md), and [remote API](docs/remote-api.md).
 
@@ -67,8 +63,6 @@ The embedded UI includes **Control, Profiles, Wi-Fi, LED and Device**, desktop s
 ## Hardware and release status
 
 The 0.91-inch SSD1306 display is **128×32**, connected over I²C1. The WebUI supports contrast, idle dim/off, inversion, rotation and startup fade; brightness and animated presentation have been iterated on physical hardware. The two-part enclosure has **STL files** for FDM printing; allow for connector/module variants and perform a physical fit check.
-
-The legacy ESP8285 AT transport, Core0 mailbox scheduling, UDP discovery and wired PIO host have undergone multiple revisions. **A successful build or simulator result is not proof of a stable long-duration play session.** Before publishing firmware, validate Wi-Fi stability, controller neutralization/release, input lag, updater behavior, PIO-USB enumeration and USB host VBUS protection on the actual board. See [release checklist](docs/RELEASE_CHECKLIST.md).
 
 ## Project information
 
