@@ -18,7 +18,7 @@ cmake --preset pico-w-2023
 cmake --build --preset pico-w-2023 --parallel
 ```
 
-Use `pico-w` for official Pico W. The firmware packaging hook expects `src/tools/firmware/make_update.py` in the repository. PIO host requires the separately validated local CMake integration; **the uploaded source snapshot's CMake does not yet enable it**. Never bypass an intentionally rejected flag by changing it without bringing over its linked source/dependency definitions. See [build guide](docs/BUILD_AND_FLASH.md).
+Use `pico-w` for official Pico W. The firmware packaging script is included at `src/tools/firmware/make_update.py` and runs automatically after linking. Wired PIO-USB host integration is present and enabled by default; the `-pio` presets provide separate build directories for hardware testing. USB-host functionality still requires physical validation. See the [build guide](docs/BUILD_AND_FLASH.md).
 
 ## Engineering expectations
 
@@ -29,6 +29,6 @@ Use `pico-w` for official Pico W. The firmware packaging hook expects `src/tools
 - Keep embedded WebUI resources self-contained; avoid extra HTTP requests for theme assets. Maintain mobile accessibility and full original Xbox button mapping.
 - Preserve third-party source notices and licenses. Do not include passwords, personal IP information or console identifiers in bug reports.
 
-This trimmed release package does **not** ship the developer's historical native test suites. Run relevant unit/integration tests from your development checkout, and report real-board behavior: board variant, firmware/source version, modem firmware if ESP8285, exact repro steps, network topology, logs and whether controller output was neutralized.
+When contributing, run applicable tests available in your development environment and report real-board behavior: board variant, firmware/source version, modem firmware if ESP8285, exact reproduction steps, network topology, logs and whether controller output was neutralized.
 
-See [release checklist](docs/RELEASE_CHECKLIST.md), [security](SECURITY.md) and [credits](CREDITS.md).
+See [security](SECURITY.md) and [credits](CREDITS.md).

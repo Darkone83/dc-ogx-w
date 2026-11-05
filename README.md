@@ -6,7 +6,7 @@
 
 **An RP2040-based controller adapter for the original Xbox and compatible USB output modes.** DC-OGX-W combines a self-hosted WebUI, Wi-Fi remote input, controller profiles, an optional 0.91-inch OLED, and an RGB status LED. The project builds on OGX-Mini and is maintained by **Darkone83 / Darkone Customs**.
 
-**Firmware source version:** `0.2.4` in this snapshot. **Stage:** active development and hardware validation. The bundled firmware images are snapshots, not proof that every current source patch has been migrated or tested on your hardware.
+**Firmware source version:** `0.2.4` in this repository snapshot. **Stage:** active development; wired PIO-USB host support is implemented but awaits physical validation. Check the board identity and firmware version of bundled images before flashing.
 
 ## Repository layout
 
@@ -20,16 +20,16 @@
 | [`PCB/`](PCB/) | Board fabrication ZIP, schematic, BOM, pick-and-place and layout images |
 | [`STL/`](STL/) | Two-piece printable enclosure (lid and base) |
 | [`assets/branding/`](assets/branding/) | Logos, WebUI theme references, splash, display assets and product art |
-| [`docs/`](docs/) | Build instructions, API, software architecture, OLED, USB-host bring-up and release checks |
+| [`docs/`](docs/) | Build instructions, API reference, software architecture, OLED, USB-host bring-up and WebUI guides |
 
 ## Supported boards
 
 | Board | CMake preset | Network hardware | Controller sources |
 |---|---|---|---|
-| Pico W-2023 clone | `pico-w-2023` | Onboard ESP8285, UART0 GP0/GP1, existing legacy AT firmware | Wi-Fi WebUI and desktop remote; no ESP Bluetooth |
-| Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers |
+| Pico W-2023 clone | `pico-w-2023` | Onboard ESP8285, UART0 GP0/GP1, existing legacy AT firmware | Wi-Fi WebUI, desktop remote and PIO-USB host (hardware test pending); no Bluetooth |
+| Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers and PIO-USB host (hardware test pending) |
 
-Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for optional PIO-USB **host input**. Host input is translated controller data, not electrical USB passthrough.
+Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for PIO-USB **host input** (enabled in current builds; awaiting hardware validation). Host input is translated controller data, not electrical USB passthrough.
 
 ## Build firmware
 
@@ -50,7 +50,7 @@ First flash: put the RP2040 into **BOOTSEL** mode and copy the correct board's U
 
 ## WebUI and connected input
 
-Connect to the adapter's SoftAP, usually `dc-ogx-w-XXXX`, with password `ogxremote`, then visit `http://192.168.4.1/`. If the device is on your home network, use the assigned LAN IP. AP-to-station behavior and UDP discovery depend on the firmware and radio variant.
+Connect to the adapter's SoftAP, usually `dc-ogx-w-XXXX`, with password `ogxremote`, then visit `http://192.168.4.1/`. If the device is on your home network, use its LAN IP or try `http://dcogxw.local/` when mDNS is supported by your client. mDNS is advertised on station Wi-Fi, **not SoftAP**; use `192.168.4.1` for SoftAP. AP-to-station behavior and UDP discovery depend on the firmware and radio variant.
 
 The embedded UI includes **Control, Profiles, Wi-Fi, LED and Device**, desktop sidebar/mobile drawer, eight appearance themes, remappable keyboard controls (including original Xbox White and Black), device profiles/calibration, OLED configuration, and firmware updating. The browser-based gamepad preview is a **local approximation**, not measured controller output. UI assets are embedded without a CDN. See [WebUI themes](docs/WEBUI_THEMES.md), [OLED UI](docs/OLED_UI.md), and [remote API](docs/remote-api.md).
 

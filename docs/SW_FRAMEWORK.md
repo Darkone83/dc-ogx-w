@@ -10,7 +10,7 @@ DC-OGX-W separates the RP2040 controller/output runtime from network/desktop inp
 | WebUI | `src/src/NetworkService/web/index.html` | Embedded offline interface; browser-local themes and keyboard bindings |
 | OLED / LED | `src/src/Display/`, `src/src/Board/` | Status and diagnostics without blocking controller processing |
 | Firmware updater | `src/src/FirmwareUpdate/` | Board-specific validated staged update; protected flash layout |
-| Wired controller host (experimental) | `src/src/USBHost/` | PIO-USB input on GP9/GP10, separately enabled via CMake integration |
+| Wired controller host (hardware validation pending) | `src/src/USBHost/` | PIO-USB input on GP9/GP10, enabled in the current CMake configuration |
 | Desktop clients | `apps/Windows/src/`, `apps/Python/` | Tauri/Rust and PySide6 consumers of the same network protocol |
 
 ## Input and protocol boundaries
@@ -19,9 +19,9 @@ The ESP8285 clone uses legacy AT firmware over UART0. Its command channel is ser
 
 USB device output and network input have different timing requirements. Stale controller snapshots must be neutralized and not replayed. A remote lease must be released or expire reliably, even if the browser/desktop client disappears. Flash saving and firmware installation are deferred until response/maintenance safeguards are satisfied; the updater is **not** power-failure-proof A/B.
 
-## Source and migration status
+## Build and validation status
 
-The uploaded snapshot contains core host runtime but not its final CMake wiring. The maintainer has separately verified that a newer PIO-USB CMake build compiles and will integrate it manually. Similarly, network/UDP/Core0 changes made after this ZIP should not be assumed present until merged. Keep board-specific builds and verify software behavior on real hardware before publishing images.
+The source includes the PIO-USB host runtime, dependency linkage, and board-specific CMake presets. Host support is enabled by default, but wired-controller operation requires hardware validation. Keep the clone and official Pico W build outputs separate, and verify console output, wired input, Bluetooth coexistence, networking and update behavior on real hardware before publishing images.
 
 ## Reuse rules
 

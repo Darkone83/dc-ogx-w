@@ -1,14 +1,12 @@
 # Wired PIO-USB host — GP9 / GP10
 
-DC-OGX-W has a planned external controller USB **host input** on RP2040 **GP9 (D+) / GP10 (D−)**. The native RP2040 USB connector remains **USB device output** toward the console/host; this is controller translation, not a transparent electrical passthrough.
+DC-OGX-W implements external controller USB **host input** using RP2040 PIO on **GP9 (D+) / GP10 (D−)**. The native RP2040 USB connector remains **USB device output** toward the console/host; this is controller translation, not a transparent electrical passthrough.
 
 ## Software status and source locations
 
-The uploaded repository contains the host runtime, including `src/src/USBHost/WiredHost.cpp`, its header, TinyUSB host callbacks, host drivers and board integration. A later CMake integration was proven to **compile successfully** on the maintainer's Pico W-2023 system. **Host-controller enumeration and long-run hardware stability have not yet been verified.**
+The repository includes `src/src/USBHost/WiredHost.cpp`, TinyUSB host callbacks, controller drivers, and the required host build integration. The PIO-enabled source has compiled successfully, but **controller enumeration, input mapping, hot-plug behavior and long-run stability still require physical testing.**
 
-**Migration required:** the ZIP used for this documentation pass still contains the old `src/cmake/options.cmake` with PIO host disabled and a deliberate CMake error if enabled. Its `src/CMakePresets.json` lacks the `-pio` presets. The maintainer will manually bring across the successful one-click CMake integration. The cleanup does **not** change the firmware build sources or claim that those new presets are already in the ZIP.
-
-After migration, select the configured `pico-w-2023-pio` or `pico-w-pio` test preset using the Pico VS Code extension and click **Compile**; separate scripts are not required. Keep the normal board presets available for rollback. If the PIO preset name differs in your final merged tree, use the names actually defined in its `CMakePresets.json`.
+**Build configuration:** `DC_OGX_USB_HOST_ENABLED` is `ON` by default in `src/cmake/options.cmake`, and `src/CMakeLists.txt` links the PIO USB host targets. The standard `pico-w-2023` and `pico-w` presets therefore include host support. The dedicated `pico-w-2023-pio` and `pico-w-pio` presets also enable it explicitly and use separate build directories for bring-up. Select the correct preset in the Pico VS Code extension and click **Compile**; no separate build script is needed.
 
 ## Electrical and timing considerations
 

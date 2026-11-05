@@ -66,8 +66,8 @@ execution that pauses Core1. Network callbacks only copy a bounded command into
 a mailbox. The integration must inhibit controller output while `active()` is
 true and initialize flash-safe execution on both cores.
 
-Run portable validation with `python tests/firmware_update/run.py`. The tests
-cover wrong-board and malformed manifests, boot vectors, checksums, incomplete
-and out-of-order transfers, duplicate chunks, flash failures, cancellation and
-timeout rollover. These checks do not replace a physical interrupted-transfer
-and successful-install test on each board.
+Before releasing an update, verify the board marker, package integrity,
+version and image size. Test rejected wrong-board or corrupted packages,
+interrupted transfers, cancellation and successful installation on each
+physical board. Automated firmware-update tests may be run from a separate
+development checkout when available; they are not included in this repository.
