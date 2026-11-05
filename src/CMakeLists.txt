@@ -131,6 +131,8 @@ if(DC_OGX_HAS_BLUETOOTH)
     add_subdirectory("${DC_OGX_BLUEPAD32_SOURCE_DIR}/src/components/bluepad32"
                      "${CMAKE_CURRENT_BINARY_DIR}/_deps/bluepad32-build")
 
+    # Bluetooth uses the 2026 source plus exactly one verified BTstack HIDS fix.
+
     # Bluetooth and Wi-Fi share one CYW43 state and background async context.
     # Bluepad32's arch_none must not propagate CYW43_LWIP=0 to consumers.
     foreach(_property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)

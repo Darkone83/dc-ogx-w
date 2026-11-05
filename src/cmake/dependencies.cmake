@@ -20,8 +20,10 @@ endfunction()
 if(DC_OGX_HAS_BLUETOOTH)
     dc_ogx_fetch(bluepad32 https://github.com/MegaCadeDev/bluepad32.git
         86d2cb86fba1a5174b0a312667320a6c8a6c2b2e src/components/bluepad32/CMakeLists.txt)
+    # Match the OGX-Mini 2026 pinned BTstack revision exactly.
+    set(DC_OGX_BTSTACK_REVISION "79c970b67d498c81f4ec4bb777a72da2531da8cb")
     dc_ogx_fetch(btstack https://github.com/MegaCadeDev/btstack.git
-        79c970b67d498c81f4ec4bb777a72da2531da8cb src/bluetooth.h)
+        "${DC_OGX_BTSTACK_REVISION}" src/bluetooth.h)
 endif()
 dc_ogx_fetch(tinyusb https://github.com/MegaCadeDev/tinyusb.git
     94fd88304851fd03c51a0666f318540aae550655 src/tusb.c)
@@ -43,39 +45,138 @@ if(DC_OGX_USB_HOST_ENABLED)
     endif()
 endif()
 
-function(dc_ogx_apply_patch source patch)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" apply --check --ignore-whitespace "${patch}"
-                    WORKING_DIRECTORY "${source}" RESULT_VARIABLE _can_apply
-                    OUTPUT_QUIET ERROR_QUIET)
-    if(_can_apply EQUAL 0)
-        execute_process(COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace "${patch}"
-                        WORKING_DIRECTORY "${source}" RESULT_VARIABLE _applied ERROR_VARIABLE _error)
-        if(NOT _applied EQUAL 0)
-            message(FATAL_ERROR "Cannot apply compatibility patch ${patch}: ${_error}")
+# Exactly one local compatibility patch: OGX-Mini 2026's BTstack HIDS
+# control-point scheduling fix.  Do NOT modify a fetched dependency in place.
+# Every CMake configure recreates the build-owned BTstack copy from the pinned
+# upstream commit.  This prevents a previous experimental patch from persisting.
+function(dc_ogx_apply_hids_control_point btstack_tree)
+    set(_file "${btstack_tree}/src/ble/gatt-service/hids_host.c")
+    set(_patch "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/patches/btstack_hids_control_point.diff")
+    if(NOT EXISTS "${_file}" OR NOT EXISTS "${_patch}")
+        message(FATAL_ERROR "HIDS patch source or patch missing: ${_file}; ${_patch}")
+    endif()
+
+    # Scope both checks to the Control Point handler, not the neighbouring
+    # set-protocol-mode handler (which already uses the correct scheduling call).
+    set(_control_point_prefix
+        "    client->handle = client->services[client->service_index].control_point_value_handle;\n    client->value = value;\n\n    client->state = HIDS_HOST_W2_WRITE_VALUE_OF_CHARACTERISTIC_WITHOUT_RESPONSE;\n    ")
+    set(_bug "${_control_point_prefix}hids_host_request_to_send_next_query(client);")
+    set(_fix "${_control_point_prefix}hids_host_request_to_send_write_without_response(client);")
+    file(READ "${_file}" _contents)
+    string(FIND "${_contents}" "${_fix}" _has_fix)
+    string(FIND "${_contents}" "${_bug}" _has_bug)
+    if(_has_fix GREATER_EQUAL 0 AND _has_bug EQUAL -1)
+        message(STATUS "dc-ogx-w: BTstack HIDS control point already corrected")
+    elseif(_has_bug GREATER_EQUAL 0 AND _has_fix EQUAL -1)
+        # Same patch as OGX-Mini 2026.  If git's hunk context drifts, apply
+        # exactly the verified block replacement, as upstream's script does.
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" apply --ignore-whitespace "${_patch}"
+            WORKING_DIRECTORY "${btstack_tree}"
+            RESULT_VARIABLE _result
+            ERROR_VARIABLE _error
+        )
+        if(NOT _result EQUAL 0)
+            message(STATUS "dc-ogx-w: git apply context missed; using exact upstream HIDS block replacement")
+            string(REPLACE "${_bug}" "${_fix}" _contents "${_contents}")
+            file(WRITE "${_file}" "${_contents}")
         endif()
     else()
-        execute_process(COMMAND "${GIT_EXECUTABLE}" apply --reverse --check --ignore-whitespace "${patch}"
-                        WORKING_DIRECTORY "${source}" RESULT_VARIABLE _already_applied
-                        OUTPUT_QUIET ERROR_QUIET)
-        if(NOT _already_applied EQUAL 0)
-            message(FATAL_ERROR "Compatibility patch does not match ${source}: ${patch}")
-        endif()
+        message(FATAL_ERROR
+            "Unrecognized BTstack HID control-point implementation in ${_file}. "
+            "Check the dependency revision instead of silently building the wrong path.")
     endif()
+
+    file(READ "${_file}" _verified)
+    string(FIND "${_verified}" "${_fix}" _verified_fix)
+    string(FIND "${_verified}" "${_bug}" _verified_bug)
+    if(_verified_fix EQUAL -1 OR NOT _verified_bug EQUAL -1)
+        message(FATAL_ERROR "Xbox BLE HIDS control-point fix is NOT active in ${_file}")
+    endif()
+    message(STATUS "dc-ogx-w: verified upstream HIDS control-point fix in ${_file}")
 endfunction()
 
-# The pinned forks already contain the OGX parser/L2CAP/report-count changes.
-# Only BTstack's HIDS control-point scheduling still needs a local correction.
-# Copy its used trees into an isolated build-owned working tree first.
 if(DC_OGX_HAS_BLUETOOTH)
     set(DC_OGX_BLUEPAD32_SOURCE_DIR "${bluepad32_SOURCE_DIR}")
     set(DC_OGX_BTSTACK_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/btstack-patched")
-    file(MAKE_DIRECTORY "${DC_OGX_BTSTACK_SOURCE_DIR}")
-    file(COPY "${btstack_SOURCE_DIR}/src" "${btstack_SOURCE_DIR}/platform"
-              "${btstack_SOURCE_DIR}/3rd-party" "${btstack_SOURCE_DIR}/tool"
-         DESTINATION "${DC_OGX_BTSTACK_SOURCE_DIR}")
-    execute_process(COMMAND "${GIT_EXECUTABLE}" init --quiet "${DC_OGX_BTSTACK_SOURCE_DIR}" RESULT_VARIABLE _init_result)
-    if(NOT _init_result EQUAL 0)
-        message(FATAL_ERROR "Cannot initialize private dependency patch workspace: ${DC_OGX_BTSTACK_SOURCE_DIR}")
+
+    # Important: FetchContent's btstack-src is a persistent Git worktree. Older
+    # experimental patches can have changed its *working files*, even when the
+    # checkout is still at the correct SHA. Simply file(COPY ...) from that
+    # directory carries stale edits into the next build.
+    #
+    # Instead extract the exact COMMITTED source with git archive. This never
+    # modifies the fetched source, and requires no manual git, scripts or
+    # deletion of build folders. An archive is made only when the build-owned
+    # copy is missing/stale; normal subsequent Compile clicks reuse it.
+    set(_btstack_hids "${DC_OGX_BTSTACK_SOURCE_DIR}/src/ble/gatt-service/hids_host.c")
+    set(_btstack_patch "${CMAKE_CURRENT_LIST_DIR}/patches/btstack_hids_control_point.diff")
+    file(SHA256 "${_btstack_patch}" _btstack_patch_sha)
+    set(_btstack_trace_module "${CMAKE_CURRENT_LIST_DIR}/xbox_ble_hids_trace.cmake")
+    file(SHA256 "${_btstack_trace_module}" _btstack_trace_sha)
+    set(_btstack_stamp_text "${DC_OGX_BTSTACK_REVISION}:${_btstack_patch_sha}:${_btstack_trace_sha}")
+    set(_btstack_stamp_file "${DC_OGX_BTSTACK_SOURCE_DIR}/.dc_ogx_clean_btstack_stamp")
+    set(_btstack_clean_copy_ok FALSE)
+    if(EXISTS "${_btstack_stamp_file}" AND EXISTS "${_btstack_hids}")
+        file(READ "${_btstack_stamp_file}" _existing_stamp)
+        if(_existing_stamp STREQUAL _btstack_stamp_text)
+            file(READ "${_btstack_hids}" _existing_hids)
+            # Include the control-point handle to avoid matching the adjacent
+            # already-correct protocol-mode write-without-response handler.
+            set(_control_point_prefix
+                "    client->handle = client->services[client->service_index].control_point_value_handle;\n    client->value = value;\n\n    client->state = HIDS_HOST_W2_WRITE_VALUE_OF_CHARACTERISTIC_WITHOUT_RESPONSE;\n    ")
+            set(_expected_call "${_control_point_prefix}hids_host_request_to_send_write_without_response(client);")
+            set(_broken_call "${_control_point_prefix}hids_host_request_to_send_next_query(client);")
+            string(FIND "${_existing_hids}" "${_expected_call}" _has_correct_call)
+            string(FIND "${_existing_hids}" "${_broken_call}" _has_wrong_call)
+            string(FIND "${_existing_hids}" "dc_ogx_hids_trace_event(client->con_handle, 1, status)" _has_hids_trace)
+            if(NOT _has_correct_call EQUAL -1 AND _has_wrong_call EQUAL -1 AND
+               NOT _has_hids_trace EQUAL -1)
+                set(_btstack_clean_copy_ok TRUE)
+            endif()
+        endif()
     endif()
-    dc_ogx_apply_patch("${DC_OGX_BTSTACK_SOURCE_DIR}" "${CMAKE_CURRENT_LIST_DIR}/patches/btstack_hids_control_point.diff")
+
+    if(NOT _btstack_clean_copy_ok)
+        message(STATUS "dc-ogx-w: restoring clean pinned BTstack and upstream HID fix")
+        file(REMOVE_RECURSE "${DC_OGX_BTSTACK_SOURCE_DIR}")
+        file(MAKE_DIRECTORY "${DC_OGX_BTSTACK_SOURCE_DIR}")
+        set(_btstack_archive "${CMAKE_CURRENT_BINARY_DIR}/_deps/btstack-clean-snapshot.tar")
+        # Archive the pinned commit, not the potentially modified working tree.
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" -C "${btstack_SOURCE_DIR}" archive
+                    --format=tar "--output=${_btstack_archive}"
+                    "${DC_OGX_BTSTACK_REVISION}" src platform 3rd-party tool
+            RESULT_VARIABLE _archive_result ERROR_VARIABLE _archive_error
+        )
+        if(NOT _archive_result EQUAL 0 OR NOT EXISTS "${_btstack_archive}")
+            message(FATAL_ERROR
+                "Cannot extract pinned BTstack revision ${DC_OGX_BTSTACK_REVISION}: ${_archive_error}")
+        endif()
+        file(ARCHIVE_EXTRACT INPUT "${_btstack_archive}"
+             DESTINATION "${DC_OGX_BTSTACK_SOURCE_DIR}")
+        file(REMOVE "${_btstack_archive}")
+        dc_ogx_apply_hids_control_point("${DC_OGX_BTSTACK_SOURCE_DIR}")
+        include("${_btstack_trace_module}")
+        dc_ogx_apply_hids_diagnostics("${DC_OGX_BTSTACK_SOURCE_DIR}")
+        # Create the stamp only *after* both source changes are verified.
+        file(WRITE "${_btstack_stamp_file}" "${_btstack_stamp_text}")
+    else()
+        message(STATUS "dc-ogx-w: clean patched BTstack already verified")
+    endif()
+
+    include("${CMAKE_CURRENT_LIST_DIR}/verify_upstream_bluetooth.cmake")
+    dc_ogx_verify_bluetooth_baseline(
+        "${DC_OGX_BLUEPAD32_SOURCE_DIR}" "${DC_OGX_BTSTACK_SOURCE_DIR}")
+
+    # Xbox Series BLE security-order trial: source overlay generated from the
+    # pinned Bluepad32 commit, never an old edited build/_deps worktree.
+    # Runs in standard CMake regeneration; no extra preset or script.
+    include("${CMAKE_CURRENT_LIST_DIR}/xbox_ble_security_gate.cmake")
+    set(_dc_bluepad32_secure "${CMAKE_CURRENT_BINARY_DIR}/_deps/bluepad32-xbox-secure")
+    dc_ogx_prepare_xbox_ble_security(
+        "${bluepad32_SOURCE_DIR}" "${_dc_bluepad32_secure}"
+        "86d2cb86fba1a5174b0a312667320a6c8a6c2b2e")
+    # CMakeLists.txt will add_subdirectory this verified source directory.
+    set(DC_OGX_BLUEPAD32_SOURCE_DIR "${_dc_bluepad32_secure}")
 endif()

@@ -336,7 +336,9 @@ HttpResult calibration_request(const Json& json, char* output, size_t capacity, 
         return error_response(output, capacity, 400, "invalid_calibration_mask");
     if (!try_lock_network()) return error_response(output, capacity, 503, "service_busy");
     const char* error = nullptr;
-    if (requested_mode.load() != Mode::Configure || mode_pending()) error = "configuration_mode_required";
+    // Live calibration must not drop controller output. Wi-Fi ownership still
+    // excludes Bluetooth input; saving continues to require Configuration mode.
+    if (requested_mode.load() == Mode::Wifi || mode_pending()) error = "physical_mode_required";
     else if (shared.save_pending) error = "save_pending_restart";
     else if (!cancel_capture && !reset && (!bluetooth_connected.load() || !shared.bluetooth.have_sample ||
              shared.bluetooth.generation != bluetooth_generation.load() ||
@@ -892,7 +894,8 @@ void on_bluetooth_input(const ControllerSample& sample, uint32_t now_ms) {
     shared.bluetooth = {sample, now_ms, generation, true};
     auto& capture = shared.capture;
     if (capture.phase != CapturePhase::Idle && capture.generation != generation) capture = Capture{};
-    if (requested_mode.load() == Mode::Configure && capture.phase != CapturePhase::Idle) {
+    if (requested_mode.load() != Mode::Wifi && !mode_pending() &&
+        capture.phase != CapturePhase::Idle) {
         if (capture.phase == CapturePhase::Center && capture.samples < 256) {
             for (unsigned i = 0; i < 6; ++i) {
                 const int16_t value = i < 4 ? sample.axis[i] : sample.trigger[i - 4];

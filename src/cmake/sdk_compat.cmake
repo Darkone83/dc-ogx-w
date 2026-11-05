@@ -35,3 +35,35 @@ if(PICO_SDK_VERSION_STRING VERSION_LESS "2.3.0")
     endif()
     set_property(TARGET pico_btstack_hci_transport_cyw43 PROPERTY INTERFACE_SOURCES "${_new_transport_sources}")
 endif()
+
+# Confirm the selected SDK or bundled shim has the upstream CYW43 HCI
+# pre-buffer fix. SDK 2.3.0+ already supplies it; older SDKs use the copy
+# selected above. Fail clearly if a custom SDK regresses this requirement.
+include("${CMAKE_CURRENT_LIST_DIR}/verify_upstream_bluetooth.cmake")
+get_target_property(_dc_hci_sources pico_btstack_hci_transport_cyw43 INTERFACE_SOURCES)
+set(_dc_verified_hci_transport FALSE)
+foreach(_dc_hci_source IN LISTS _dc_hci_sources)
+    if(_dc_hci_source MATCHES "btstack_hci_transport_cyw43\\.c$")
+        dc_ogx_verify_cyw43_transport("${_dc_hci_source}")
+        set(_dc_verified_hci_transport TRUE)
+    endif()
+endforeach()
+if(NOT _dc_verified_hci_transport)
+    message(FATAL_ERROR
+        "Bluetooth baseline: could not verify the selected CYW43 HCI transport source")
+endif()
+message(STATUS "dc-ogx-w: CYW43 HCI receive-buffer compatibility verified")
+
+# Prove SDK actually compiles the build-owned, patched HIDS host.  A correct
+# .diff on disk is meaningless if the SDK links another BTstack copy.
+if(DC_OGX_HAS_BLUETOOTH)
+    if(NOT "${PICO_BTSTACK_PATH}" STREQUAL "${DC_OGX_BTSTACK_SOURCE_DIR}")
+        message(FATAL_ERROR "Bluetooth stack mismatch: selected ${PICO_BTSTACK_PATH}, patched ${DC_OGX_BTSTACK_SOURCE_DIR}")
+    endif()
+    get_target_property(_dc_bt_ble_sources pico_btstack_ble INTERFACE_SOURCES)
+    set(_dc_required_hids_source "${DC_OGX_BTSTACK_SOURCE_DIR}/src/ble/gatt-service/hids_host.c")
+    if(NOT _dc_required_hids_source IN_LIST _dc_bt_ble_sources)
+        message(FATAL_ERROR "Pico SDK Bluetooth target is not using patched HIDS host: ${_dc_required_hids_source}")
+    endif()
+    message(STATUS "dc-ogx-w: confirmed compiled HIDS host: ${_dc_required_hids_source}")
+endif()

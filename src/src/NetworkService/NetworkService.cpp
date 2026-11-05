@@ -2,6 +2,9 @@
 #include "Transport.h"
 #include "WebProtocol.h"
 #include "RemoteControl/RemoteControl.h"
+#if defined(CONFIG_EN_BLUETOOTH)
+#include "Bluepad32/Bluepad32.h"
+#endif
 #include "RemoteControl/Json.h"
 #include "NetworkSettings.h"
 #include "FirmwareUpdate/FirmwareUpdate.h"
@@ -9,6 +12,12 @@
 #include "Board/LedSettings.h"
 #include "Display/OledDisplay.h"
 #include "Display/OledSettings.h"
+#if defined(CONFIG_EN_USB_HOST)
+#include "Input/InputSlot.h"
+#endif
+#if defined(CONFIG_EN_BLUETOOTH)
+#include "controller/uni_controller_type.h"
+#endif
 
 #include <atomic>
 #include <cstdio>
@@ -113,6 +122,41 @@ std::atomic<bool> service_ready{false};
 std::atomic<uint8_t> save_completion{0}; // Bit 0: ready; bit 1: peer TCP acknowledgement.
 std::atomic<uint32_t> runtime_bits{0};
 std::atomic<uint8_t> health_bits{0};
+#if !defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
+// Bit layout: ready, AP active, STA configured, STA connected, joining.
+// Release-store the flags last so Core0 never needs the mutable radio structs.
+std::atomic<std::uint32_t> oled_network_flags{0};
+std::atomic<std::uint32_t> oled_station_ipv4{0};
+std::uint32_t pack_ipv4(const char* address) {
+    if (!address || !*address) return 0;
+    std::uint32_t packed = 0;
+    const char* p = address;
+    for (unsigned octet = 0; octet < 4; ++octet) {
+        unsigned value = 0, digits = 0;
+        while (*p >= '0' && *p <= '9' && digits < 3) {
+            value = value * 10u + static_cast<unsigned>(*p++ - '0');
+            ++digits;
+        }
+        if (!digits || value > 255 || (octet < 3 && *p++ != '.')) return 0;
+        packed = (packed << 8u) | value;
+    }
+    return *p == '\0' ? packed : 0;
+}
+void publish_oled_network(const Transport::Status& st) {
+    // Parse only on IP changes, not on every 10-ms radio callback.
+    static char last_station_ip[16]{};
+    static std::uint32_t cached_ipv4{};
+    const char* address = st.station_ip ? st.station_ip : "";
+    if (std::strncmp(last_station_ip, address, sizeof(last_station_ip) - 1) != 0) {
+        std::snprintf(last_station_ip, sizeof(last_station_ip), "%s", address);
+        cached_ipv4 = pack_ipv4(last_station_ip);
+    }
+    oled_station_ipv4.store(cached_ipv4, std::memory_order_relaxed);
+    oled_network_flags.store((st.ready ? 1u : 0u) | (st.ap_active ? 2u : 0u) |
+        (st.station_configured ? 4u : 0u) | (st.station_connected ? 8u : 0u) |
+        (st.station_joining ? 16u : 0u), std::memory_order_release);
+}
+#endif
 std::atomic<SaveAction> pending_action{SaveAction::None};
 std::atomic<uint8_t> install_cancel_state{0}; // 0 idle, 1 discard requested, 2 Core0 discarded.
 uint32_t request_count{};
@@ -688,6 +732,74 @@ size_t network_json(char *output, size_t capacity) {
     const uint32_t flags = runtime_bits.load(std::memory_order_relaxed);
     const auto transport = Transport::status();
     const auto led = StatusLed::snapshot();
+    // A compact, read-only diagnostic distinguishes lost HCI/HID reports from
+    // a RemoteControl mailbox/calibration or Xbox USB output problem.
+#if defined(CONFIG_EN_BLUETOOTH)
+    char bt_flow[1280]{};
+#else
+    char bt_flow[1]{};
+#endif
+#if defined(CONFIG_EN_BLUETOOTH)
+    const auto bt = bluepad32::hid_flow_stats(to_ms_since_boot(get_absolute_time()));
+    const int bt_n = std::snprintf(bt_flow, sizeof(bt_flow),
+                  "\"bt_hid\":{\"ready\":%lu,\"disconnects\":%lu,\"callbacks\":%lu,"
+                  "\"reports\":%lu,\"age_ms\":%lu,\"slot\":%ld,\"output\":%ld,"
+                  "\"type\":%lu,\"hids_cid\":%lu,\"le\":%s,"
+                  "\"name\":\"%s\",\"vid\":%lu,\"pid\":%lu,"
+                  "\"stage\":%lu,\"stage_age_ms\":%lu,\"ready_age_ms\":%lu,"
+                  "\"failure\":%lu,\"error_code\":%lu,\"failure_age_ms\":%lu,"
+                  "\"pairing_state\":%lu,\"pairing_status\":%lu,\"pairing_reason\":%lu,"
+                  "\"hci_reason\":%lu,"
+                  "\"hids\":{\"setup\":%lu,\"cccd_try\":%lu,\"cccd_ack\":%lu,"
+                  "\"cccd_ok\":%lu,\"cccd_errors\":%lu,\"cccd_req_status\":%lu,"
+                  "\"cccd_status\":%lu,\"notify\":%lu,\"get_reply\":%lu,"
+                  "\"raw_notify\":%lu,\"raw_value_handle\":%lu,\"raw_age_ms\":%lu,"
+                  "\"origin\":%lu,\"report_id\":%lu,\"notify_age_ms\":%lu,"
+                  "\"get_age_ms\":%lu,\"exit_calls\":%lu,\"exit_status\":%lu,"
+                  "\"get_try\":%lu,\"get_rejected\":%lu,\"get_status\":%lu}},",
+                  static_cast<unsigned long>(bt.ready_events),
+                  static_cast<unsigned long>(bt.disconnect_events),
+                  static_cast<unsigned long>(bt.callbacks),
+                  static_cast<unsigned long>(bt.gamepad_reports),
+                  static_cast<unsigned long>(bt.last_gamepad_age_ms),
+                  static_cast<long>(bt.bt_slot), static_cast<long>(bt.output_slot),
+                  static_cast<unsigned long>(bt.controller_type),
+                  static_cast<unsigned long>(bt.hids_cid), bt.bluetooth_le ? "true" : "false",
+                  bt.name, static_cast<unsigned long>(bt.vendor_id),
+                  static_cast<unsigned long>(bt.product_id),
+                  static_cast<unsigned long>(bt.stage),
+                  static_cast<unsigned long>(bt.stage_age_ms),
+                  static_cast<unsigned long>(bt.ready_age_ms),
+                  static_cast<unsigned long>(bt.failure_kind),
+                  static_cast<unsigned long>(bt.failure_code),
+                  static_cast<unsigned long>(bt.failure_age_ms),
+                  static_cast<unsigned long>(bt.pairing_state),
+                  static_cast<unsigned long>(bt.pairing_status),
+                  static_cast<unsigned long>(bt.pairing_reason),
+                  static_cast<unsigned long>(bt.disconnect_reason),
+                  static_cast<unsigned long>(bt.hids_setup_status),
+                  static_cast<unsigned long>(bt.cccd_attempts),
+                  static_cast<unsigned long>(bt.cccd_acks),
+                  static_cast<unsigned long>(bt.cccd_ok),
+                  static_cast<unsigned long>(bt.cccd_errors),
+                  static_cast<unsigned long>(bt.cccd_request_status),
+                  static_cast<unsigned long>(bt.cccd_last_status),
+                  static_cast<unsigned long>(bt.notifications),
+                  static_cast<unsigned long>(bt.get_results),
+                  static_cast<unsigned long>(bt.raw_gatt_notifications),
+                  static_cast<unsigned long>(bt.raw_gatt_value_handle),
+                  static_cast<unsigned long>(bt.raw_gatt_age_ms),
+                  static_cast<unsigned long>(bt.last_origin),
+                  static_cast<unsigned long>(bt.last_report_id),
+                  static_cast<unsigned long>(bt.notification_age_ms),
+                  static_cast<unsigned long>(bt.get_result_age_ms),
+                  static_cast<unsigned long>(bt.exit_suspend_calls),
+                  static_cast<unsigned long>(bt.exit_suspend_status),
+                  static_cast<unsigned long>(bt.get_requests),
+                  static_cast<unsigned long>(bt.get_rejected),
+                  static_cast<unsigned long>(bt.get_request_status));
+    if (bt_n < 0 || static_cast<size_t>(bt_n) >= sizeof(bt_flow)) return 0;
+#endif
 #if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     constexpr const char *board = "pico_w_2023";
 #else
@@ -700,7 +812,7 @@ size_t network_json(char *output, size_t capacity) {
         output, capacity,
         "{\"ready\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"channel\":%u,"
         "\"clients\":%u,\"requests\":%lu,\"usb_configured\":%s,"
-        "\"bluetooth_connected\":%s,\"wired_connected\":%s,\"remote_owned\":%s,\"board\":\"%s\","
+        "\"bluetooth_connected\":%s,%s\"wired_connected\":%s,\"remote_owned\":%s,\"board\":\"%s\","
         "\"bluetooth_available\":%s,\"transport\":\"%s\",\"uart_baud\":%lu,"
         "\"input_hz\":%u,\"save_delivery\":\"%s\",\"error\":\"%s\","
         "\"ap_ip\":\"%s\",\"ap_active\":%s,\"station_configured\":%s,\"station_connected\":%s,"
@@ -717,7 +829,7 @@ size_t network_json(char *output, size_t capacity) {
         transport.station_connected ? transport.station_ip : transport.ap_ip,
         OGXM_WIFI_CHANNEL, active_clients(),
         static_cast<unsigned long>(request_count), flags & 1 ? "true" : "false",
-        flags & 2 ? "true" : "false", flags & 4 ? "true" : "false", flags & 8 ? "true" : "false", board,
+        flags & 2 ? "true" : "false", bt_flow, flags & 4 ? "true" : "false", flags & 8 ? "true" : "false", board,
         transport.bluetooth_available ? "true" : "false", transport.name,
         static_cast<unsigned long>(transport.uart_baud),
         static_cast<unsigned>(transport.recommended_input_hz), delivery, transport.error,
@@ -1374,7 +1486,13 @@ void poll() {
 #if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     complete_core_requests();
 #endif
+#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
+    // Clone: independent ESP8285; continue servicing the OLED on its existing core.
     OledDisplay::service(now_ms(), Transport::status());
+#else
+    // Official Pico W: I2C must never block the shared CYW43/BTstack radio loop.
+    publish_oled_network(Transport::status());
+#endif
     // Cancel both in-flight reply completions and Core0's settling timer before
     // reopening the gate. Otherwise an old delayed install could arm a newly
     // uploaded image after a recoverable pre-install validation failure.
@@ -1467,6 +1585,98 @@ void poll() {
 
 void start_radio_poll() {
     Transport::start_radio_poll();
+}
+
+// Called on Core0 only. Both the official CYW43 board and the ESP8285 clone
+// publish existing input ownership; the OLED never queries Bluetooth directly.
+static void publish_oled_input_sources(std::uint32_t now_ms) {
+    // Read-only controller metadata. Both sources are already maintained by the
+    // ordinary input pipeline; do not wake or poll the radio for OLED content.
+    OledDisplay::InputKind bt_kind=OledDisplay::InputKind::Generic;
+    bool bt_connected=false;
+    bool bt_le=false;
+#if defined(CONFIG_EN_BLUETOOTH)
+    bt_connected=bluepad32::any_connected();
+    if (bt_connected) {
+        const auto bt=bluepad32::hid_flow_stats(now_ms);
+        bt_le=bt.bluetooth_le;
+        switch (bt.controller_type) {
+            case CONTROLLER_TYPE_XBoxOneController: bt_kind=OledDisplay::InputKind::Xbox; break;
+            case CONTROLLER_TYPE_XBox360Controller: bt_kind=OledDisplay::InputKind::Xbox360; break;
+            case CONTROLLER_TYPE_PS3Controller: bt_kind=OledDisplay::InputKind::Ps3; break;
+            case CONTROLLER_TYPE_PS4Controller: bt_kind=OledDisplay::InputKind::Ps4; break;
+            case CONTROLLER_TYPE_PS5Controller: bt_kind=OledDisplay::InputKind::Ps5; break;
+            case CONTROLLER_TYPE_SwitchProController:
+            case CONTROLLER_TYPE_Switch2ProController: bt_kind=OledDisplay::InputKind::SwitchPro; break;
+            case CONTROLLER_TYPE_WiiController: bt_kind=OledDisplay::InputKind::Wii; break;
+            case CONTROLLER_TYPE_8BitdoController: bt_kind=OledDisplay::InputKind::EightBitDo; break;
+            case CONTROLLER_TYPE_SteamController:
+            case CONTROLLER_TYPE_SteamControllerTriton: bt_kind=OledDisplay::InputKind::Steam; break;
+            default: break;
+        }
+    }
+#endif
+    OledDisplay::InputKind usb_kind=OledDisplay::InputKind::Generic;
+    bool wired_connected=false;
+#if defined(CONFIG_EN_USB_HOST)
+    const auto slot=InputSlot::get(0);
+    wired_connected=slot.transport==InputTransport::USB;
+    if (wired_connected) {
+        switch (slot.physical_driver) {
+            case HostDriverType::XBOXONE: usb_kind=OledDisplay::InputKind::Xbox; break;
+            case HostDriverType::XBOX360:
+            case HostDriverType::XBOX360W: usb_kind=OledDisplay::InputKind::Xbox360; break;
+            case HostDriverType::PS3: usb_kind=OledDisplay::InputKind::Ps3; break;
+            case HostDriverType::PS4: usb_kind=OledDisplay::InputKind::Ps4; break;
+            case HostDriverType::PS5: usb_kind=OledDisplay::InputKind::Ps5; break;
+            case HostDriverType::SWITCH_PRO:
+            case HostDriverType::SWITCH_PRO_2:
+            case HostDriverType::SWITCH: usb_kind=OledDisplay::InputKind::SwitchPro; break;
+            case HostDriverType::GAMESIR_CYCLONE2:
+            case HostDriverType::GAMESIR_G7_PRO: usb_kind=OledDisplay::InputKind::GameSir; break;
+            default: break;
+        }
+    }
+#endif
+    OledDisplay::publish_input_devices(bt_connected,bt_kind,bt_le,wired_connected,usb_kind);
+}
+
+void service_display_from_core0(std::uint32_t now_ms) {
+    // Input metadata is cheap, but there is no reason to sample it every USB
+    // iteration. This also supplies the clone's Core1 OLED with an atomic view.
+    static std::uint32_t next_sources{};
+    if (static_cast<std::int32_t>(now_ms-next_sources)>=0) {
+        next_sources=now_ms+100u;
+        publish_oled_input_sources(now_ms);
+    }
+
+#if !defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
+    // 5-ms service cadence. The OLED retains its 16-byte I2C chunks,
+    // bounding interruption of Xbox USB device processing to ~0.4 ms.
+    static std::uint32_t next_service{};
+    if (static_cast<std::int32_t>(now_ms - next_service) < 0) return;
+    next_service = now_ms + 5u;
+    const std::uint32_t flags = oled_network_flags.load(std::memory_order_acquire);
+    const std::uint32_t ipv4 = oled_station_ipv4.load(std::memory_order_relaxed);
+    Transport::Status snapshot{};
+    snapshot.ready = (flags & 1u) != 0;
+    snapshot.ap_active = (flags & 2u) != 0;
+    snapshot.station_configured = (flags & 4u) != 0;
+    snapshot.station_connected = (flags & 8u) != 0;
+    snapshot.station_joining = (flags & 16u) != 0;
+    char station_ip[16]{};
+    if (snapshot.station_connected && ipv4) {
+        std::snprintf(station_ip, sizeof(station_ip), "%u.%u.%u.%u",
+            static_cast<unsigned>((ipv4 >> 24u) & 255u),
+            static_cast<unsigned>((ipv4 >> 16u) & 255u),
+            static_cast<unsigned>((ipv4 >> 8u) & 255u),
+            static_cast<unsigned>(ipv4 & 255u));
+    }
+    snapshot.station_ip = station_ip;
+    OledDisplay::service(now_ms, snapshot);
+#else
+    (void)now_ms;
+#endif
 }
 
 void note_runtime(bool usb, bool bluetooth, bool wired, bool remote_owned) {

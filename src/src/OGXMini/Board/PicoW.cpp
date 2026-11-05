@@ -523,7 +523,9 @@ void pico_w::run() {
     while (true) {
         TaskQueue::Core0::process_tasks();
 #if defined(CONFIG_OGXM_NETWORK)
-        DeviceServices::tick(to_ms_since_boot(get_absolute_time()), tud_mounted(), bluepad32::any_connected());
+        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        DeviceServices::tick(now_ms, tud_mounted(), bluepad32::any_connected());
+        NetworkService::service_display_from_core0(now_ms);
 #endif
         tud_task();
 #if defined(CONFIG_EN_USB_HOST)
@@ -539,12 +541,12 @@ void pico_w::run() {
 #endif
         }
         bluepad32::process_pending_adaptive_triggers();
-        if (tud_mounted()) {
-            if (bluepad32::any_connected()) sleep_us(250);
-            else tight_loop_contents();
-        } else {
-            sleep_ms(1);
-        }
+        // Keep Core0 cooperative even while no pad is connected. On Pico W,
+        // racing through this loop can starve Core1/CYW43 during Bluetooth
+        // discovery, the HID-ready handshake, and Wi-Fi coexistence.
+        // PIO-USB SOF timing is maintained by its dedicated 1 kHz timer.
+        // Match the upstream OGX-Mini 2026 pacing for stable Bluetooth.
+        sleep_ms(1);
     }
 #else
     OGXM_LOG("PicoW run: start\n");
@@ -662,7 +664,9 @@ void pico_w::run() {
         TaskQueue::Core0::process_tasks();
 #if defined(CONFIG_OGXM_NETWORK)
         if (s_network_mode) {
-            RemoteControl::tick(to_ms_since_boot(get_absolute_time()));
+            const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+            RemoteControl::tick(now_ms);
+            NetworkService::service_display_from_core0(now_ms);
 #if defined(CONFIG_EN_USB_HOST)
             const bool wired = HostManager::get_instance().any_mounted();
 #else

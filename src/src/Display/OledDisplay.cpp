@@ -43,6 +43,8 @@
 namespace OledDisplay {
 namespace {
 std::atomic<std::uint32_t> shared{1u << 8};
+// Bits: BT connected(0), USB host connected(1), BLE(2), BT kind(8..15), USB kind(16..23).
+std::atomic<std::uint32_t> input_sources{0};
 std::atomic<bool> online{false};
 std::atomic<std::uint32_t> activity_posted{0};
 std::atomic<std::uint32_t> activity_seq{0};
@@ -50,12 +52,15 @@ std::atomic<std::uint32_t> activity_seq{0};
 constexpr unsigned kWidth = 128;
 constexpr unsigned kHeight = 32;       // Actual panel, not a scaled 128x64 scene.
 constexpr unsigned kPages = 4;
-constexpr unsigned kBurst = 16;        // 512-byte frame, 16 bytes per service burst.
+// Keep each Core0 I2C burst below ~0.5 ms at 400 kHz.
+// With a 5-ms service cadence, a 512-byte screen needs ~160 ms.
+constexpr unsigned kBurst = 16;
 constexpr std::uint32_t kProbeMs = 10000;
 constexpr std::uint32_t kSplashMs = 1550;
 constexpr std::uint32_t kIpMs = 12000;
 constexpr std::uint32_t kProfileMs = 4000;
 constexpr std::uint32_t kNetworkMs = 3300;
+constexpr std::uint32_t kInputMs = 4400;
 constexpr unsigned kWipeSteps = 4;
 static_assert(DC_OGX_OLED_ADDRESS == 0x3c || DC_OGX_OLED_ADDRESS == 0x3d, "Invalid SSD1306 address");
 static_assert(DC_OGX_OLED_CONTRAST >= 0 && DC_OGX_OLED_CONTRAST <= 255, "Invalid OLED contrast");
@@ -68,6 +73,7 @@ bool panel_on = true;
 std::uint32_t next_probe = 0;
 std::uint32_t next_chunk = 0;
 std::uint32_t previous_state = ~0u;
+std::uint32_t previous_inputs = ~0u;
 std::uint8_t previous_network_flags = 0xff;
 std::uint32_t page_deadline = 0;
 std::uint32_t splash_since = 0;
@@ -523,6 +529,39 @@ void draw_profile(std::uint32_t state,std::uint8_t motion) {
     micro_text(49,25,!usb?"DISCONNECTED":owned?(fresh?"INPUT LIVE":"INPUT WAIT"):"STANDBY");
     if (owned && fresh) sparkle(120,4,motion);
 }
+const char* input_name(InputKind kind) {
+    switch (kind) {
+        case InputKind::Xbox: return "XBOX ONE/SERIES";
+        case InputKind::Xbox360: return "XBOX 360";
+        case InputKind::Ps3: return "DUALSHOCK 3";
+        case InputKind::Ps4: return "DUALSHOCK 4";
+        case InputKind::Ps5: return "DUALSENSE";
+        case InputKind::SwitchPro: return "SWITCH PRO";
+        case InputKind::Wii: return "WII / WII U";
+        case InputKind::EightBitDo: return "8BITDO";
+        case InputKind::Steam: return "STEAM PAD";
+        case InputKind::GameSir: return "GAMESIR";
+        default: return "GAMEPAD";
+    }
+}
+void draw_input_page(bool wired, std::uint32_t inputs, std::uint32_t state,
+                     std::uint8_t motion) {
+    const auto kind = static_cast<InputKind>((inputs >> (wired ? 16u : 8u)) & 0xffu);
+    const char* label = input_name(kind);
+    fill_rect(0, 0, wired ? 27 : 21, 10);
+    micro_text(4, 1, wired ? "USB" : "BT", false);
+    micro_text(wired ? 32 : 26, 1, "CONNECTED");
+    const unsigned profile = static_cast<unsigned>((state >> 8u) & 0xffu);
+    char tag[7]{};
+    std::snprintf(tag, sizeof(tag), "P%u", profile);
+    micro_text(128 - micro_width(tag) - 2, 1, tag);
+    line(2, 11, 125, 11);
+    if (string_width(kCompact, label) <= 124)
+        draw_text((128 - string_width(kCompact, label)) / 2, 14, label, kCompact);
+    else micro_text((128 - micro_width(label)) / 2, 18, label);
+    micro_text(3, 26, wired ? "WIRED HOST" : (inputs & 4u) ? "BLUETOOTH LE" : "CLASSIC BT");
+    if ((motion & 1u) == 0u) fill_rect(123, 28, 3, 3);
+}
 void network_emblem(int x,int y,std::uint8_t motion,bool connecting) {
     // A hand-drawn large radio/radar glyph, with optional moving radar beam.
     line(x+5,y+19,x+19,y+19);
@@ -640,7 +679,8 @@ void draw(const NetworkService::Transport::Status& network,std::uint32_t state,
         const bool station=network.station_connected && network.station_ip && *network.station_ip;
         draw_ip(station?network.station_ip:network.ap_ip,station,network.ready,state,network,motion);
     } else if (page==2) draw_profile(state,motion);
-    else draw_network(network,motion);
+    else if (page==3) draw_network(network,motion);
+    else draw_input_page(page==5, input_sources.load(std::memory_order_acquire), state, motion);
     blend_transition();
 }
 void offline(std::uint32_t now) {
@@ -679,6 +719,7 @@ bool initialize() {
     page_deadline=0;
     splash_since=0;
     previous_state=~0u;
+    previous_inputs=~0u;
     previous_network_flags=0xff;
     previous_ip[0]='\0';
     displayed_overlay=0;
@@ -705,6 +746,15 @@ void publish_controller(bool usb,bool owned,bool fresh,std::uint8_t profile,std:
     shared.store((usb?1u:0u)|(owned?2u:0u)|(fresh?4u:0u)|
                  (static_cast<std::uint32_t>(profile)<<8u)|
                  (static_cast<std::uint32_t>(mode)<<16u),std::memory_order_release);
+}
+void publish_input_devices(bool bluetooth_connected, InputKind bluetooth_type, bool bluetooth_le,
+                           bool wired_connected, InputKind wired_type) {
+    const auto status = (bluetooth_connected ? 1u : 0u) |
+                        (wired_connected ? 2u : 0u) |
+                        (bluetooth_le ? 4u : 0u) |
+                        (static_cast<std::uint32_t>(bluetooth_type) << 8u) |
+                        (static_cast<std::uint32_t>(wired_type) << 16u);
+    input_sources.store(status, std::memory_order_release);
 }
 void notify(Activity event) {
     if (event==Activity::None) return;
@@ -769,24 +819,46 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
             splash_since=now;
             page_deadline=now+kSplashMs;
         } else if (due(now,page_deadline)) {
-            page=page==3?1:static_cast<std::uint8_t>(page+1u);
-            page_deadline=now+(page==1?kIpMs:page==2?kProfileMs:kNetworkMs);
+            const auto available=input_sources.load(std::memory_order_acquire);
+            for (unsigned tries=0; tries<5; ++tries) {
+                page=page>=5?1:static_cast<std::uint8_t>(page+1u);
+                if (page==4 && !(available&1u)) continue;
+                if (page==5 && !(available&2u)) continue;
+                break;
+            }
+            page_deadline=now+(page==1?kIpMs:page==2?kProfileMs:
+                               page==3?kNetworkMs:kInputMs);
             frame_dirty=true;
         }
     }
-    const std::uint8_t scene=overlay==2 ? 5u : overlay==1 ? 4u : page;
+    // Overlay scene numbers must not collide with Bluetooth/USB pages 4 and 5.
+    const std::uint8_t scene=overlay==2 ? 7u : overlay==1 ? 6u : page;
     if (scene!=visible_scene) {
         // Snapshot the *last frame* before replacing it. The 4-stage wipe
         // operates entirely in RAM; never block service to perform a transition.
         std::memcpy(wipe_source,fb,sizeof(fb));
         visible_scene=scene;
-        wipe_style=scene==5?1u:scene==2?2u:scene==3?0u:scene==4?0u:2u;
+        wipe_style=scene==7?1u:scene==2?2u:scene==3?0u:scene==6?0u:2u;
         wipe_step=1;
         wiping=true;
         next_wipe_step=now+145u;
         frame_dirty=true;
     }
     const std::uint32_t state=shared.load(std::memory_order_acquire);
+    const std::uint32_t sources=input_sources.load(std::memory_order_acquire);
+    if (sources!=previous_inputs) {
+        const std::uint32_t previous=previous_inputs;
+        previous_inputs=sources;
+        last_external_activity=now;
+        frame_dirty=true;
+        if (!overlay) {
+            if ((sources&2u) && !(previous&2u)) page=5;
+            else if ((sources&1u) && !(previous&1u)) page=4;
+            else if ((page==4 && !(sources&1u)) || (page==5 && !(sources&2u))) page=1;
+            if (page==4 || page==5) page_deadline=now+kInputMs;
+            else if (page==1) page_deadline=now+kIpMs;
+        }
+    }
     const bool lan=network.station_connected && network.station_ip && *network.station_ip;
     const char* ip=lan?network.station_ip:network.ap_ip;
     const std::uint8_t flags=static_cast<std::uint8_t>(

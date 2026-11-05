@@ -25,6 +25,9 @@ bool start();
 void poll();
 // Called after Bluepad32 has installed its BTstack run loop; no-op for ESP.
 void start_radio_poll();
+// Official Pico W: execute bounded OLED I2C work on Core0, never inside CYW43/BTstack.
+// The radio core only publishes a compact atomic network snapshot.
+void service_display_from_core0(std::uint32_t now_ms);
 // Core0 only: publish physical connection snapshots.
 void note_runtime(bool usb_configured, bool bluetooth_connected, bool wired_connected,
                   bool remote_owned = false);

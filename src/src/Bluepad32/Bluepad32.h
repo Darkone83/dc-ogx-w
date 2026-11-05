@@ -10,6 +10,28 @@
     and kept away from tinyusb due to naming conflicts */
 
 namespace bluepad32 {
+    /** Controller reception diagnostics; atomics are sampled without blocking the radio. */
+    struct HidFlowStats {
+        uint32_t ready_events, disconnect_events, callbacks, gamepad_reports;
+        uint32_t last_gamepad_age_ms; // UINT32_MAX = no report since READY
+        int32_t bt_slot, output_slot;
+        uint32_t controller_type, hids_cid;
+        bool bluetooth_le;
+        // Last observed connection, read-only across Core0/Core1.
+        char name[25];
+        uint32_t vendor_id, product_id;
+        uint32_t stage, stage_age_ms, ready_age_ms;
+        uint32_t failure_kind, failure_code, failure_age_ms;
+        uint32_t pairing_state, pairing_status, pairing_reason, disconnect_reason;
+        uint32_t hids_setup_status, cccd_attempts, cccd_acks, cccd_ok, cccd_errors;
+        uint32_t cccd_request_status, cccd_last_status;
+        uint32_t notifications, get_results, last_origin, last_report_id;
+        uint32_t raw_gatt_notifications, raw_gatt_value_handle, raw_gatt_age_ms;
+        uint32_t notification_age_ms, get_result_age_ms;
+        uint32_t exit_suspend_calls, exit_suspend_status;
+        uint32_t get_requests, get_rejected, get_request_status;
+    };
+    HidFlowStats hid_flow_stats(uint32_t now_ms);
     /** True if any Bluetooth gamepad is connected (Classic or LE). */
     bool any_connected();
     /** Serialized Core1 radio context only. Wi-Fi source disables scans,

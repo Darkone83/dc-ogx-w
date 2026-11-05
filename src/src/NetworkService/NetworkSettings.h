@@ -8,7 +8,7 @@ namespace NetworkSettings {
 struct Settings {
     char station_ssid[33]{};
     char station_password[65]{};
-    char hostname[33] = "dc-ogx-w";
+    char hostname[33] = "dcogxw";
     bool station_enabled = false;
 };
 

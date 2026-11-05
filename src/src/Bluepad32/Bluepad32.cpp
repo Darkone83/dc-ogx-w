@@ -7,6 +7,8 @@
 #include <pico/time.h>
 
 #include <btstack.h>
+#include <ble/gatt_client.h>
+#include <ble/gatt-service/hids_host.h>
 #include "btstack_run_loop.h"
 #include "gap.h"
 #include "uni.h"
@@ -19,6 +21,252 @@
 
 /** Core0 status/LED and USB mux read a coherent radio-owned connection flag. */
 static std::atomic<bool> s_bt_any_connected_cached{false};
+// Diagnostics stay independent of the RemoteControl mailbox. A calibration
+// snapshot can go stale even when the raw HID callback is still running.
+static std::atomic<uint32_t> s_diag_ready_events{0}, s_diag_disconnect_events{0};
+static std::atomic<uint32_t> s_diag_callbacks{0}, s_diag_gamepad_reports{0};
+static std::atomic<uint32_t> s_diag_last_report_ms{0};
+static std::atomic<int32_t> s_diag_bt_slot{-1}, s_diag_output_slot{-1};
+static std::atomic<uint32_t> s_diag_type{0}, s_diag_hids_cid{0};
+static std::atomic<bool> s_diag_ble{false};
+// Passive connection diagnostics. No Bluetooth writes, polling, or extra timers.
+// Every field is atomic because Core1 records events and Core0 serves /api/status.
+enum : uint32_t { DIAG_NONE, DIAG_LINK, DIAG_PAIRING, DIAG_READY, DIAG_REPORTS, DIAG_DISCONNECTED, DIAG_REJECTED };
+enum : uint32_t { FAIL_NONE, FAIL_PAIRING, FAIL_REENCRYPT, FAIL_AUTH, FAIL_NO_OUTPUT, FAIL_MODE, FAIL_EARLY_DISCONNECT, FAIL_ENCRYPTION, FAIL_LINK };
+static std::atomic<uint32_t> s_diag_stage{DIAG_NONE}, s_diag_stage_ms{0}, s_diag_ready_ms{0};
+static std::atomic<uint32_t> s_diag_fail{FAIL_NONE}, s_diag_fail_code{0}, s_diag_fail_ms{0};
+static std::atomic<uint32_t> s_diag_pairing_state{0}, s_diag_pairing_status{0}, s_diag_pairing_reason{0};
+static std::atomic<uint32_t> s_diag_disconnect_reason{0}, s_diag_conn_handle{0xffff};
+static std::atomic<uint32_t> s_diag_vid{0}, s_diag_pid{0};
+static std::atomic<uint8_t> s_diag_name[25]{};
+// Read-only HIDS-host telemetry from the pinned BTstack C implementation.
+// Kinds: 1 HIDS ready, 2 CCCD request, 3 CCCD result,
+//        4 notification, 5 GET result, 6 Exit Suspend, 7 GET request.
+static std::atomic<uint32_t> s_hids_setup_status{UINT32_MAX};
+static std::atomic<uint32_t> s_hids_cccd_attempts{0}, s_hids_cccd_acks{0};
+static std::atomic<uint32_t> s_hids_cccd_ok{0}, s_hids_cccd_errors{0};
+static std::atomic<uint32_t> s_hids_cccd_request_status{UINT32_MAX};
+static std::atomic<uint32_t> s_hids_cccd_last_status{UINT32_MAX};
+static std::atomic<uint32_t> s_hids_notifications{0}, s_hids_get_results{0};
+/* Passive wildcard listener: counts all GATT notifications before HIDS report matching. */
+static std::atomic<uint32_t> s_raw_gatt_notifications{0}, s_raw_gatt_last_ms{0};
+static std::atomic<uint32_t> s_raw_gatt_last_value_handle{0};
+static gatt_client_notification_t s_raw_gatt_listener{};
+static void diag_raw_gatt_event(uint8_t packet_type, uint16_t, uint8_t* packet, uint16_t size) {
+    if (packet_type != HCI_EVENT_PACKET || size < 12 ||
+        hci_event_packet_get_type(packet) != GATT_EVENT_NOTIFICATION) return;
+    if (gatt_event_notification_get_handle(packet) !=
+        s_diag_conn_handle.load(std::memory_order_relaxed)) return;
+    s_raw_gatt_notifications.fetch_add(1, std::memory_order_relaxed);
+    s_raw_gatt_last_ms.store(to_ms_since_boot(get_absolute_time()), std::memory_order_relaxed);
+    s_raw_gatt_last_value_handle.store(
+        gatt_event_notification_get_value_handle(packet), std::memory_order_relaxed);
+}
+static std::atomic<uint32_t> s_hids_last_origin{0}, s_hids_last_report_id{0};
+static std::atomic<uint32_t> s_hids_last_notification_ms{0};
+static std::atomic<uint32_t> s_hids_last_get_ms{0};
+static std::atomic<uint32_t> s_hids_exit_suspend_calls{0};
+static std::atomic<uint32_t> s_hids_exit_suspend_status{UINT32_MAX};
+static std::atomic<uint32_t> s_hids_get_requests{0}, s_hids_get_rejected{0};
+static std::atomic<uint32_t> s_hids_get_request_status{UINT32_MAX};
+
+extern "C" void dc_ogx_hids_trace_event(uint16_t conn_handle, uint8_t event, uint16_t detail) {
+    // Called synchronously on Core1 by BTstack, without allocation, locks or I/O.
+    if (conn_handle != s_diag_conn_handle.load(std::memory_order_relaxed)) return;
+    const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    switch (event) {
+        case 1: s_hids_setup_status.store(detail, std::memory_order_relaxed); break;
+        case 2:
+            s_hids_cccd_attempts.fetch_add(1, std::memory_order_relaxed);
+            s_hids_cccd_request_status.store(detail, std::memory_order_relaxed);
+            if (detail != 0) s_hids_cccd_errors.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case 3:
+            s_hids_cccd_acks.fetch_add(1, std::memory_order_relaxed);
+            s_hids_cccd_last_status.store(detail, std::memory_order_relaxed);
+            if (detail == 0) s_hids_cccd_ok.fetch_add(1, std::memory_order_relaxed);
+            else s_hids_cccd_errors.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case 4:
+            s_hids_notifications.fetch_add(1, std::memory_order_relaxed);
+            s_hids_last_notification_ms.store(now_ms, std::memory_order_relaxed);
+            s_hids_last_origin.store(1, std::memory_order_relaxed);
+            s_hids_last_report_id.store(detail, std::memory_order_relaxed);
+            break;
+        case 5:
+            s_hids_get_results.fetch_add(1, std::memory_order_relaxed);
+            s_hids_last_get_ms.store(now_ms, std::memory_order_relaxed);
+            s_hids_last_origin.store(2, std::memory_order_relaxed);
+            s_hids_last_report_id.store(detail, std::memory_order_relaxed);
+            break;
+        case 6:
+            s_hids_exit_suspend_calls.fetch_add(1, std::memory_order_relaxed);
+            s_hids_exit_suspend_status.store(detail, std::memory_order_relaxed);
+            break;
+        case 7:
+            s_hids_get_requests.fetch_add(1, std::memory_order_relaxed);
+            s_hids_get_request_status.store(detail, std::memory_order_relaxed);
+            if (detail != 0) s_hids_get_rejected.fetch_add(1, std::memory_order_relaxed);
+            break;
+    }
+}
+
+static uint32_t diag_now() { return to_ms_since_boot(get_absolute_time()); }
+static void diag_stage(uint32_t stage) {
+    s_diag_stage.store(stage, std::memory_order_relaxed);
+    s_diag_stage_ms.store(diag_now(), std::memory_order_relaxed);
+}
+static void diag_failure(uint32_t kind, uint32_t code) {
+    s_diag_fail.store(kind, std::memory_order_relaxed);
+    s_diag_fail_code.store(code, std::memory_order_relaxed);
+    s_diag_fail_ms.store(diag_now(), std::memory_order_relaxed);
+}
+// Only printable, JSON-safe ASCII is exposed over HTTP; never forward raw BT names.
+static void diag_set_name(const char* name) {
+    bool finished = false;
+    for (unsigned i = 0; i < 25; ++i) {
+        uint8_t ch = 0;
+        if (i != 24 && !finished && name && name[i]) {
+            ch = static_cast<uint8_t>(name[i]);
+            if (ch < 32 || ch > 126 || ch == '\"' || ch == '\\') ch = '_';
+        } else finished = true;
+        s_diag_name[i].store(ch, std::memory_order_relaxed);
+    }
+}
+// Before Bluepad32 reaches DEVICE_READY, only the HCI handle may be known.
+static void diag_new_link(uint16_t handle, bool le) {
+    s_diag_callbacks.store(0, std::memory_order_relaxed);
+    s_diag_gamepad_reports.store(0, std::memory_order_relaxed);
+    s_diag_last_report_ms.store(0, std::memory_order_relaxed);
+    s_diag_ready_ms.store(0, std::memory_order_relaxed);
+    s_diag_fail.store(FAIL_NONE, std::memory_order_relaxed);
+    s_diag_fail_code.store(0, std::memory_order_relaxed);
+    s_diag_fail_ms.store(0, std::memory_order_relaxed);
+    s_diag_pairing_state.store(0, std::memory_order_relaxed);
+    s_diag_pairing_status.store(0, std::memory_order_relaxed);
+    s_diag_pairing_reason.store(0, std::memory_order_relaxed);
+    s_diag_disconnect_reason.store(0, std::memory_order_relaxed);
+    s_diag_conn_handle.store(handle, std::memory_order_relaxed);
+    s_diag_bt_slot.store(-1, std::memory_order_relaxed);
+    s_diag_output_slot.store(-1, std::memory_order_relaxed);
+    s_diag_type.store(0, std::memory_order_relaxed);
+    s_diag_vid.store(0, std::memory_order_relaxed);
+    s_diag_pid.store(0, std::memory_order_relaxed);
+    s_diag_hids_cid.store(0, std::memory_order_relaxed);
+    s_hids_setup_status.store(UINT32_MAX, std::memory_order_relaxed);
+    s_hids_cccd_attempts.store(0, std::memory_order_relaxed);
+    s_hids_cccd_acks.store(0, std::memory_order_relaxed);
+    s_hids_cccd_ok.store(0, std::memory_order_relaxed);
+    s_hids_cccd_errors.store(0, std::memory_order_relaxed);
+    s_hids_cccd_request_status.store(UINT32_MAX, std::memory_order_relaxed);
+    s_hids_cccd_last_status.store(UINT32_MAX, std::memory_order_relaxed);
+    s_hids_notifications.store(0, std::memory_order_relaxed);
+    s_raw_gatt_notifications.store(0, std::memory_order_relaxed);
+    s_raw_gatt_last_ms.store(0, std::memory_order_relaxed);
+    s_raw_gatt_last_value_handle.store(0, std::memory_order_relaxed);
+    s_hids_get_results.store(0, std::memory_order_relaxed);
+    s_hids_last_origin.store(0, std::memory_order_relaxed);
+    s_hids_last_report_id.store(0, std::memory_order_relaxed);
+    s_hids_last_notification_ms.store(0, std::memory_order_relaxed);
+    s_hids_last_get_ms.store(0, std::memory_order_relaxed);
+    s_hids_exit_suspend_calls.store(0, std::memory_order_relaxed);
+    s_hids_exit_suspend_status.store(UINT32_MAX, std::memory_order_relaxed);
+    s_hids_get_requests.store(0, std::memory_order_relaxed);
+    s_hids_get_rejected.store(0, std::memory_order_relaxed);
+    s_hids_get_request_status.store(UINT32_MAX, std::memory_order_relaxed);
+    s_diag_ble.store(le, std::memory_order_relaxed);
+    diag_set_name(nullptr);
+    diag_stage(DIAG_LINK);
+}
+static void diag_connected_device(uni_hid_device_t* device) {
+    const bool new_attempt = s_diag_conn_handle.load(std::memory_order_relaxed) != device->conn.handle ||
+        s_diag_stage.load(std::memory_order_relaxed) == DIAG_DISCONNECTED ||
+        s_diag_stage.load(std::memory_order_relaxed) == DIAG_NONE;
+    if (new_attempt)
+        diag_new_link(device->conn.handle, device->conn.handle != UNI_BT_CONN_HANDLE_INVALID &&
+                      gap_get_connection_type(device->conn.handle) == GAP_CONNECTION_LE);
+    // The HCI listener can record SMP errors before Bluepad32 calls connected.
+    // Preserve them when the higher-level callback finally arrives.
+    s_diag_conn_handle.store(device->conn.handle, std::memory_order_relaxed);
+    s_diag_bt_slot.store(uni_hid_device_get_idx_for_instance(device), std::memory_order_relaxed);
+    s_diag_type.store(static_cast<uint32_t>(device->controller_type), std::memory_order_relaxed);
+    s_diag_vid.store(static_cast<uint32_t>(device->vendor_id), std::memory_order_relaxed);
+    s_diag_pid.store(static_cast<uint32_t>(device->product_id), std::memory_order_relaxed);
+    s_diag_hids_cid.store(static_cast<uint32_t>(device->hids_cid), std::memory_order_relaxed);
+    s_diag_ble.store(device->conn.handle != UNI_BT_CONN_HANDLE_INVALID &&
+                     gap_get_connection_type(device->conn.handle) == GAP_CONNECTION_LE,
+                     std::memory_order_relaxed);
+    diag_set_name(device->name);
+}
+// Observe existing BTstack events only; the upstream event handlers still own pairing.
+static btstack_packet_callback_registration_t s_diag_hci_listener{};
+static btstack_packet_callback_registration_t s_diag_sm_listener{};
+static void diag_hci_event(uint8_t type, uint16_t, uint8_t* packet, uint16_t size) {
+    if (type != HCI_EVENT_PACKET || !packet || size < 3) return;
+    const uint8_t event = hci_event_packet_get_type(packet);
+    if (event == HCI_EVENT_LE_META && size >= 6 &&
+        hci_event_le_meta_get_subevent_code(packet) == HCI_SUBEVENT_LE_CONNECTION_COMPLETE) {
+        const uint8_t status = hci_subevent_le_connection_complete_get_status(packet);
+        const uint16_t handle = hci_subevent_le_connection_complete_get_connection_handle(packet);
+        if (status == ERROR_CODE_SUCCESS) {
+            // Can precede the Bluepad32 on_device_connected callback by the entire GATT setup.
+            auto* device = uni_hid_device_get_instance_for_connection_handle(handle);
+            if (device) diag_connected_device(device);
+            else diag_new_link(handle, true);
+        } else {
+            // Failed HCI connection has no valid handle to correlate to a controller.
+            diag_new_link(0xffff, true);
+            diag_failure(FAIL_LINK, status);
+            diag_stage(DIAG_REJECTED);
+        }
+    } else if (event == HCI_EVENT_DISCONNECTION_COMPLETE && size >= 6 &&
+        hci_event_disconnection_complete_get_connection_handle(packet) == s_diag_conn_handle.load(std::memory_order_relaxed)) {
+        s_diag_disconnect_reason.store(hci_event_disconnection_complete_get_reason(packet), std::memory_order_relaxed);
+        if (s_diag_stage.load(std::memory_order_relaxed) < DIAG_READY &&
+            s_diag_fail.load(std::memory_order_relaxed) == FAIL_NONE)
+            diag_failure(FAIL_EARLY_DISCONNECT, 0);
+        diag_stage(DIAG_DISCONNECTED);
+    } else if (event == HCI_EVENT_AUTHENTICATION_COMPLETE && size >= 5 &&
+        hci_event_authentication_complete_get_connection_handle(packet) == s_diag_conn_handle.load(std::memory_order_relaxed)) {
+        const uint8_t status = hci_event_authentication_complete_get_status(packet);
+        if (status != ERROR_CODE_SUCCESS) diag_failure(FAIL_AUTH, status);
+    } else if (event == HCI_EVENT_ENCRYPTION_CHANGE && size >= 6 &&
+        hci_event_encryption_change_get_connection_handle(packet) == s_diag_conn_handle.load(std::memory_order_relaxed)) {
+        const uint8_t status = hci_event_encryption_change_get_status(packet);
+        if (status != ERROR_CODE_SUCCESS) diag_failure(FAIL_ENCRYPTION, status);
+    }
+}
+static void diag_sm_event(uint8_t type, uint16_t, uint8_t* packet, uint16_t size) {
+    if (type != HCI_EVENT_PACKET || !packet || size < 3) return;
+    const uint8_t event = hci_event_packet_get_type(packet);
+    if (event == SM_EVENT_PAIRING_STARTED) {
+        const uint16_t handle = sm_event_pairing_started_get_handle(packet);
+        if (handle == s_diag_conn_handle.load(std::memory_order_relaxed)) {
+            s_diag_pairing_state.store(1, std::memory_order_relaxed);
+            diag_stage(DIAG_PAIRING);
+        }
+    } else if (event == SM_EVENT_PAIRING_COMPLETE) {
+        if (sm_event_pairing_complete_get_handle(packet) != s_diag_conn_handle.load(std::memory_order_relaxed)) return;
+        const uint8_t status = sm_event_pairing_complete_get_status(packet);
+        s_diag_pairing_status.store(status, std::memory_order_relaxed);
+        const bool already_ready = s_diag_ready_ms.load(std::memory_order_relaxed) != 0;
+        const bool ignored_post_ready_timeout =
+            status == ERROR_CODE_CONNECTION_TIMEOUT && already_ready;
+        s_diag_pairing_state.store(ignored_post_ready_timeout ? 4u :
+                                   (status == ERROR_CODE_SUCCESS ? 2u : 3u),
+                                   std::memory_order_relaxed);
+        if (status != ERROR_CODE_SUCCESS && !ignored_post_ready_timeout) {
+            const uint8_t reason = sm_event_pairing_complete_get_reason(packet);
+            s_diag_pairing_reason.store(reason, std::memory_order_relaxed);
+            diag_failure(FAIL_PAIRING, status);
+        }
+    } else if (event == SM_EVENT_REENCRYPTION_COMPLETE) {
+        if (sm_event_reencryption_complete_get_handle(packet) != s_diag_conn_handle.load(std::memory_order_relaxed)) return;
+        const uint8_t status = sm_event_reencryption_complete_get_status(packet);
+        if (status != ERROR_CODE_SUCCESS) diag_failure(FAIL_REENCRYPT, status);
+    }
+}
+
 
 #include "Bluepad32/Bluepad32.h"
 #include "Bluepad32/ClassicPairingDebug.h"
@@ -156,6 +404,11 @@ static constexpr uint16_t CONNECT_RUMBLE_DELAY_PS4_MS = 1200;
 static constexpr uint16_t CONNECT_RUMBLE_DELAY_DEFAULT_MS = 300;
 
 static uint32_t s_last_bt_input_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
+/* BTstack/HIDS reports stop after the first Xbox GET reply in the currently
+ * observed failure. Keep a bounded backup GET available from the application's
+ * existing Core1 feedback timer, without modifying upstream Bluepad32 code. */
+static bool s_bt_seen_hid_report[CONFIG_BLUEPAD32_MAX_DEVICES]{};
+static uint32_t s_xbox_ble_last_recovery_get_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 static uint32_t s_xbox_ble_ka_last_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 static uint32_t s_sw2_ble_ka_last_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 /** Ignore Start+Select disconnect combo for this long after connect (DS4 can glitch both on first reports). */
@@ -222,6 +475,64 @@ static bool pending_adaptive_trigger_send_[MAX_GAMEPADS]{false};
 bool any_connected()
 {
     return s_bt_any_connected_cached.load(std::memory_order_acquire);
+}
+
+HidFlowStats hid_flow_stats(uint32_t now_ms) {
+    HidFlowStats r{};
+    r.ready_events = s_diag_ready_events.load(std::memory_order_relaxed);
+    r.disconnect_events = s_diag_disconnect_events.load(std::memory_order_relaxed);
+    r.callbacks = s_diag_callbacks.load(std::memory_order_relaxed);
+    r.gamepad_reports = s_diag_gamepad_reports.load(std::memory_order_relaxed);
+    const uint32_t last = s_diag_last_report_ms.load(std::memory_order_relaxed);
+    r.last_gamepad_age_ms = last ? static_cast<uint32_t>(now_ms - last) : UINT32_MAX;
+    r.bt_slot = s_diag_bt_slot.load(std::memory_order_relaxed);
+    r.output_slot = s_diag_output_slot.load(std::memory_order_relaxed);
+    r.controller_type = s_diag_type.load(std::memory_order_relaxed);
+    r.hids_cid = s_diag_hids_cid.load(std::memory_order_relaxed);
+    r.bluetooth_le = s_diag_ble.load(std::memory_order_relaxed);
+    for (unsigned i = 0; i < sizeof(r.name); ++i)
+        r.name[i] = static_cast<char>(s_diag_name[i].load(std::memory_order_relaxed));
+    r.name[sizeof(r.name) - 1] = 0;
+    r.vendor_id = s_diag_vid.load(std::memory_order_relaxed);
+    r.product_id = s_diag_pid.load(std::memory_order_relaxed);
+    r.stage = s_diag_stage.load(std::memory_order_relaxed);
+    const uint32_t event_ms = s_diag_stage_ms.load(std::memory_order_relaxed);
+    r.stage_age_ms = event_ms ? now_ms - event_ms : UINT32_MAX;
+    const uint32_t ready_ms = s_diag_ready_ms.load(std::memory_order_relaxed);
+    r.ready_age_ms = ready_ms ? now_ms - ready_ms : UINT32_MAX;
+    r.failure_kind = s_diag_fail.load(std::memory_order_relaxed);
+    r.failure_code = s_diag_fail_code.load(std::memory_order_relaxed);
+    const uint32_t failure_ms = s_diag_fail_ms.load(std::memory_order_relaxed);
+    r.failure_age_ms = failure_ms ? now_ms - failure_ms : UINT32_MAX;
+    r.pairing_state = s_diag_pairing_state.load(std::memory_order_relaxed);
+    r.pairing_status = s_diag_pairing_status.load(std::memory_order_relaxed);
+    r.pairing_reason = s_diag_pairing_reason.load(std::memory_order_relaxed);
+    r.disconnect_reason = s_diag_disconnect_reason.load(std::memory_order_relaxed);
+    r.hids_setup_status = s_hids_setup_status.load(std::memory_order_relaxed);
+    r.cccd_attempts = s_hids_cccd_attempts.load(std::memory_order_relaxed);
+    r.cccd_acks = s_hids_cccd_acks.load(std::memory_order_relaxed);
+    r.cccd_ok = s_hids_cccd_ok.load(std::memory_order_relaxed);
+    r.cccd_errors = s_hids_cccd_errors.load(std::memory_order_relaxed);
+    r.cccd_request_status = s_hids_cccd_request_status.load(std::memory_order_relaxed);
+    r.cccd_last_status = s_hids_cccd_last_status.load(std::memory_order_relaxed);
+    r.notifications = s_hids_notifications.load(std::memory_order_relaxed);
+    r.raw_gatt_notifications = s_raw_gatt_notifications.load(std::memory_order_relaxed);
+    r.raw_gatt_value_handle = s_raw_gatt_last_value_handle.load(std::memory_order_relaxed);
+    const uint32_t raw_ms = s_raw_gatt_last_ms.load(std::memory_order_relaxed);
+    r.raw_gatt_age_ms = raw_ms ? now_ms - raw_ms : UINT32_MAX;
+    r.get_results = s_hids_get_results.load(std::memory_order_relaxed);
+    r.last_origin = s_hids_last_origin.load(std::memory_order_relaxed);
+    r.last_report_id = s_hids_last_report_id.load(std::memory_order_relaxed);
+    r.notification_age_ms = s_hids_last_notification_ms.load(std::memory_order_relaxed);
+    r.notification_age_ms = r.notification_age_ms ? now_ms - r.notification_age_ms : UINT32_MAX;
+    r.get_result_age_ms = s_hids_last_get_ms.load(std::memory_order_relaxed);
+    r.get_result_age_ms = r.get_result_age_ms ? now_ms - r.get_result_age_ms : UINT32_MAX;
+    r.exit_suspend_calls = s_hids_exit_suspend_calls.load(std::memory_order_relaxed);
+    r.exit_suspend_status = s_hids_exit_suspend_status.load(std::memory_order_relaxed);
+    r.get_requests = s_hids_get_requests.load(std::memory_order_relaxed);
+    r.get_rejected = s_hids_get_rejected.load(std::memory_order_relaxed);
+    r.get_request_status = s_hids_get_request_status.load(std::memory_order_relaxed);
+    return r;
 }
 
 bool is_wii_controller_connected(uint8_t idx)
@@ -351,9 +662,47 @@ static void send_feedback_cb(btstack_timer_source *ts)
         }
     after_stall_check:
 
+#if defined(CONFIG_TARGET_PICO_W)
+        /* Genuine Microsoft Xbox over LE only. The pinned 2026 parser stops
+         * its startup GET poll after the FIRST HID event, even if that event
+         * was itself a GET response and no notifications ever arrived.
+         *
+         * Don't alter the upstream parser, pairing/security, or other pads.
+         * Once a real input was observed and it becomes stale, request the
+         * current state on our EXISTING feedback timer. The Device diagnostic
+         * panel already counts both requests and replies, so failures stay
+         * visible (COMMAND_DISALLOWED, no GET replies, etc.).
+         *
+         * This is a bounded fallback/diagnostic, not a claim of 60 Hz input
+         * and not a replacement for repairing missing notifications. */
+        if (bp_device->vendor_id == 0x045eu &&
+            bp_device->controller_type == CONTROLLER_TYPE_XBoxOneController &&
+            bp_device->conn.handle != UNI_BT_CONN_HANDLE_INVALID &&
+            gap_get_connection_type(bp_device->conn.handle) == GAP_CONNECTION_LE &&
+            bp_device->hids_cid != 0 && bp_device->hids_cid != 0xffff &&
+            s_bt_seen_hid_report[i] && s_last_bt_input_ms[i] != 0 &&
+            static_cast<uint32_t>(now_ms - s_last_bt_input_ms[i]) >= 400u &&
+            (s_xbox_ble_last_recovery_get_ms[i] == 0u ||
+             static_cast<uint32_t>(now_ms - s_xbox_ble_last_recovery_get_ms[i]) >= 250u)) {
+            s_xbox_ble_last_recovery_get_ms[i] = now_ms;
+            /* Called on the radio/BTstack core; never from Core0 or HTTP. */
+            const uint8_t result = hids_host_send_get_report(
+                bp_device->hids_cid, 0x01, HID_REPORT_TYPE_INPUT);
+#if defined(CONFIG_OGXM_DEBUG)
+            if (result != ERROR_CODE_SUCCESS) {
+                printf("[Xbox BLE] recovery GET refused: 0x%02x\n", result);
+            }
+#else
+            (void)result;
+#endif
+        }
+#endif
+
+        // Bluepad32 may use BT slot 1 even though this build exposes only one
+        // Xbox pad. Feedback (including Xbox BLE keepalive) must use the same
+        // physical output mapping as the HID input callback, not raw BT slot.
         const int out_i = bp32_get_gamepad_output_idx(bp_device);
-        const int gp_idx =
-            (out_i >= 0 && out_i < static_cast<int>(MAX_GAMEPADS)) ? out_i : static_cast<int>(i);
+        const int gp_idx = resolve_bt_output_pad_idx(out_i >= 0 ? out_i : static_cast<int>(i));
         if (gp_idx < 0 || gp_idx >= static_cast<int>(MAX_GAMEPADS) || bt_devices_[gp_idx].gamepad == nullptr)
             continue;
 
@@ -383,7 +732,7 @@ static void send_feedback_cb(btstack_timer_source *ts)
         if (gp_out.rumble_l > 0 || gp_out.rumble_r > 0)
         {
             if (bp_device->controller_type == CONTROLLER_TYPE_PS4Controller &&
-                now_ms < s_ps4_rumble_ok_ms[i])
+                now_ms < s_ps4_rumble_ok_ms[gp_idx])
                 ;
             else if (!bp32_is_joycon_pair_secondary(bp_device))
             {
@@ -473,7 +822,10 @@ static void device_connected_cb(uni_hid_device_t* device) {
     if (device == nullptr) {
         return;
     }
+    diag_connected_device(device);
     if (!remote_bt_allowed()) {
+        diag_failure(FAIL_MODE, 0);
+        diag_stage(DIAG_REJECTED);
         uni_hid_device_disconnect(device);
         return;
     }
@@ -607,7 +959,9 @@ static void bt_disconnect_reboot_cb(btstack_timer_source_t* ts) {
 
 /** Xbox Series / One S over BLE (HOGP) — in-place reconnect leaves HIDS/bond state bad. */
 static bool device_is_xbox_ble(const uni_hid_device_t* d) {
-    return d != nullptr && d->controller_type == CONTROLLER_TYPE_XBoxOneController && d->hids_cid != 0;
+    return d != nullptr && d->vendor_id == 0x045eu &&
+           d->controller_type == CONTROLLER_TYPE_XBoxOneController &&
+           d->hids_cid != 0 && d->hids_cid != 0xffff;
 }
 
 /**
@@ -726,7 +1080,14 @@ static void device_disconnected_cb(uni_hid_device_t* device) {
     gamesir_cyclone2_bt_on_disconnected(device);
 
     const bool was_ready = s_bt_slot_was_ready[idx];
+    // Do not overwrite a specific pairing/authentication failure with a generic disconnect.
+    if (!was_ready && s_diag_fail.load(std::memory_order_relaxed) == FAIL_NONE &&
+        s_diag_stage.load(std::memory_order_relaxed) != DIAG_REJECTED)
+        diag_failure(FAIL_EARLY_DISCONNECT, 0);
+    diag_stage(DIAG_DISCONNECTED);
+    if (was_ready) s_diag_disconnect_events.fetch_add(1, std::memory_order_relaxed);
     s_bt_slot_was_ready[idx] = false;
+    s_bt_seen_hid_report[idx] = false;
 
     bt_devices_[idx].connected = false;
     bool any_other_connected = false;
@@ -743,10 +1104,15 @@ static void device_disconnected_cb(uni_hid_device_t* device) {
     s_last_bt_input_ms[idx] = 0;
     s_xbox_ble_ka_last_ms[idx] = 0;
     s_sw2_ble_ka_last_ms[idx] = 0;
-    s_bt_disconnect_combo_grace_until_ms[idx] = 0;
-    s_ps4_rumble_ok_ms[idx] = 0;
-    prev_touchpad_clicked_[idx] = false;
-    pending_adaptive_trigger_send_[idx] = false;
+    s_xbox_ble_last_recovery_get_ms[idx] = 0;
+    /* Bluepad32 has two connection slots, but this build has one output pad.
+     * Do not index output-pad state using a second Bluetooth slot. */
+    if (idx < static_cast<int>(MAX_GAMEPADS)) {
+        s_bt_disconnect_combo_grace_until_ms[idx] = 0;
+        s_ps4_rumble_ok_ms[idx] = 0;
+        prev_touchpad_clicked_[idx] = false;
+        pending_adaptive_trigger_send_[idx] = false;
+    }
     /* Never clear PadIn for an OGX slot owned by USB (BT idx often equals USB pad 0). */
     const int out_for_reset = bp32_get_gamepad_output_idx(device);
     const int pad_for_reset =
@@ -769,6 +1135,16 @@ static void device_disconnected_cb(uni_hid_device_t* device) {
         btstack_run_loop_remove_timer(&feedback_timer_);
     }
 
+    /* The Ultimate family can expose different HID personalities. Log the
+     * actual detected identity and transport on disconnect, even if Wi-Fi
+     * currently owns output; this avoids assuming an Xbox BLE classification. */
+    const bool xbox_ble = device_is_xbox_ble(device);
+    printf("[BP32] BT disconnect slot=%d name=%.24s type=%u vid=%04x pid=%04x hids=%u ready=%u xbox_ble=%u\n",
+           idx, device->name, static_cast<unsigned>(device->controller_type),
+           static_cast<unsigned>(device->vendor_id), static_cast<unsigned>(device->product_id),
+           static_cast<unsigned>(device->hids_cid), static_cast<unsigned>(was_ready),
+           static_cast<unsigned>(xbox_ble));
+
     if (any_other_connected || !remote_bt_allowed())
         return;
 
@@ -782,7 +1158,6 @@ static void device_disconnected_cb(uni_hid_device_t* device) {
      * reconnect in place; rebooting those on OG Xbox looks like a freeze.
      * Failed pair attempts must not reboot or we never stay in pairing mode.
      */
-    const bool xbox_ble = device_is_xbox_ble(device);
     if (was_ready && xbox_ble && !s_bt_disconnect_reboot_pending) {
         s_bt_disconnect_reboot_pending = true;
         s_bt_disconnect_reboot_timer.process = bt_disconnect_reboot_cb;
@@ -827,6 +1202,8 @@ static uni_error_t device_ready_cb(uni_hid_device_t* device) {
     const int out_idx = bp32_get_gamepad_output_idx(device);
     const int pad_idx = resolve_bt_output_pad_idx(out_idx >= 0 ? out_idx : idx);
     if (pad_idx < 0) {
+        diag_failure(FAIL_NO_OUTPUT, 0);
+        diag_stage(DIAG_REJECTED);
 #if defined(CONFIG_OGXM_DEBUG)
         printf("\n[BT READY REJECTED]\nbt_idx=%d preferred_out=%d — no free OGX slot "
                "(USB occupies all MAX_GAMEPADS=%u)\n",
@@ -848,8 +1225,31 @@ static uni_error_t device_ready_cb(uni_hid_device_t* device) {
         return UNI_ERROR_INVALID_CONTROLLER;
     }
 
+    printf("[BP32] READY name=%.24s bt_slot=%d out=%d type=%u vid=%04x pid=%04x hids=%u\n",
+           device->name, idx, pad_idx, static_cast<unsigned>(device->controller_type),
+           static_cast<unsigned>(device->vendor_id), static_cast<unsigned>(device->product_id),
+           static_cast<unsigned>(device->hids_cid));
     bt_devices_[idx].connected = true;
     s_bt_slot_was_ready[idx] = true;
+    s_bt_seen_hid_report[idx] = false;
+    s_xbox_ble_last_recovery_get_ms[idx] = 0;
+    // Capture the *real* BT slot and transport, not the remapped Xbox pad slot.
+    s_diag_ready_events.fetch_add(1, std::memory_order_relaxed);
+    s_diag_ready_ms.store(diag_now(), std::memory_order_relaxed);
+    diag_stage(DIAG_READY);
+    s_diag_vid.store(static_cast<uint32_t>(device->vendor_id), std::memory_order_relaxed);
+    s_diag_pid.store(static_cast<uint32_t>(device->product_id), std::memory_order_relaxed);
+    s_diag_conn_handle.store(device->conn.handle, std::memory_order_relaxed);
+    diag_set_name(device->name);
+    s_diag_callbacks.store(0, std::memory_order_relaxed);
+    s_diag_gamepad_reports.store(0, std::memory_order_relaxed);
+    s_diag_last_report_ms.store(0, std::memory_order_relaxed);
+    s_diag_bt_slot.store(idx, std::memory_order_relaxed);
+    s_diag_output_slot.store(pad_idx, std::memory_order_relaxed);
+    s_diag_type.store(static_cast<uint32_t>(device->controller_type), std::memory_order_relaxed);
+    s_diag_hids_cid.store(static_cast<uint32_t>(device->hids_cid), std::memory_order_relaxed);
+    s_diag_ble.store(gap_get_connection_type(device->conn.handle) == GAP_CONNECTION_LE,
+                     std::memory_order_relaxed);
     flydigi_apex4_bt_on_ready(device);
     gamesir_cyclone2_bt_on_ready(device);
 #if defined(CONFIG_OGXM_DEBUG)
@@ -970,15 +1370,26 @@ static void oob_event_cb(uni_platform_oob_event_t event, void* data) {
 #endif
 
 static void controller_data_cb(uni_hid_device_t* device, uni_controller_t* controller) {
+    s_diag_callbacks.fetch_add(1, std::memory_order_relaxed);
     if (!remote_bt_allowed()) return;
     static uni_gamepad_t prev_uni_gp[MAX_GAMEPADS] = {};
 
     if (controller->klass != UNI_CONTROLLER_CLASS_GAMEPAD){
         return;
     }
+    const uint32_t previous_reports = s_diag_gamepad_reports.fetch_add(1, std::memory_order_relaxed);
+    if (previous_reports == 0) diag_stage(DIAG_REPORTS);
+    s_diag_last_report_ms.store(to_ms_since_boot(get_absolute_time()), std::memory_order_relaxed);
 
     uni_gamepad_t *uni_gp = &controller->gamepad;
     const int bt_slot = uni_hid_device_get_idx_for_instance(device);
+    if (bt_slot >= 0 && bt_slot < CONFIG_BLUEPAD32_MAX_DEVICES &&
+        !s_bt_seen_hid_report[bt_slot]) {
+        s_bt_seen_hid_report[bt_slot] = true;
+        printf("[BP32] FIRST GAMEPAD REPORT bt_slot=%d buttons=%04x dpad=%02x\n",
+               bt_slot, static_cast<unsigned>(controller->gamepad.buttons),
+               static_cast<unsigned>(controller->gamepad.dpad));
+    }
     int idx = bp32_get_gamepad_output_idx(device);
     if (idx < 0)
         idx = bt_slot;
@@ -1406,6 +1817,15 @@ void init(Gamepad(&gamepads)[MAX_GAMEPADS])
 
     uni_platform_set_custom(get_driver());
     uni_init(0, nullptr);
+    /* Observe GATT notifications, including those HIDS cannot map to a report.
+     * No writes, no new timers, and no changes to the existing listeners. */
+    gatt_client_listen_for_characteristic_value_updates(
+        &s_raw_gatt_listener, diag_raw_gatt_event,
+        GATT_CLIENT_ANY_CONNECTION, nullptr);
+    s_diag_hci_listener.callback = diag_hci_event;
+    hci_add_event_handler(&s_diag_hci_listener);
+    s_diag_sm_listener.callback = diag_sm_event;
+    sm_add_event_handler(&s_diag_sm_listener);
 
     led_timer_set_ = true;
     led_timer_.process = check_led_cb;
@@ -1450,7 +1870,15 @@ void run_task(Gamepad(&gamepads)[MAX_GAMEPADS])
         uni_bt_enable_new_connections_safe(false);
         OGXM_LOG("BT: applied deferred USB quiet (pad was plugged during BT bring-up)\n");
     }
-    btstack_run_loop_execute();
+    /* Upstream OGX-Mini-2026 PR #146: BTstack timer wakeups can be lost in the
+     * CYW43 threadsafe-background async context. Re-trigger its low-priority
+     * service IRQ every 2 ms so HOGP timers continue even when hardware alarm
+     * re-arming fails. Keep this at the very end of run_task() on Core1.
+     * This does not change Wi-Fi, pairing, profiles, or controller parsers. */
+    while (true) {
+        btstack_run_loop_poll_data_sources_from_irq();
+        busy_wait_us(2000);
+    }
 }
 
 } // namespace bluepad32

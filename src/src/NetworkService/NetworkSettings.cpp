@@ -167,6 +167,10 @@ void initialize() {
         record.magic == MAGIC && record.version == VERSION &&
         record.checksum == crc32(&record, offsetof(Record, checksum)) && valid(record.settings))
         active = record.settings;
+    // Migrate only the former stock hostname; preserve intentional custom names.
+    // Network credentials and all other NVS settings remain unchanged.
+    if (std::strcmp(active.hostname, "dc-ogx-w") == 0)
+        std::strcpy(active.hostname, "dcogxw");
 }
 
 const Settings& get() { return active; }

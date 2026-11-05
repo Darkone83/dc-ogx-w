@@ -10,4 +10,3 @@ index 4f674ce09..a792fc393 100644
 +    hids_host_request_to_send_write_without_response(client);
      return ERROR_CODE_SUCCESS;
  }
- 

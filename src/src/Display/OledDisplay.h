@@ -25,6 +25,13 @@ enum class Activity : std::uint8_t {
 void notify(Activity event);
 void publish_controller(bool usb_connected, bool remote_owned, bool input_fresh,
                         std::uint8_t profile_id, std::uint8_t output_driver);
+// Type is a short display category, not a new controller parser or connection owner.
+// Core0 publishes it atomically; the OLED has no direct BTstack/USB-host access.
+enum class InputKind : std::uint8_t {
+    Generic, Xbox, Xbox360, Ps3, Ps4, Ps5, SwitchPro, Wii, EightBitDo, Steam, GameSir,
+};
+void publish_input_devices(bool bluetooth_connected, InputKind bluetooth_type, bool bluetooth_le,
+                           bool wired_connected, InputKind wired_type);
 void service(std::uint32_t now_ms, const NetworkService::Transport::Status& network);
 bool detected();
 } // namespace OledDisplay

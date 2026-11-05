@@ -23,6 +23,8 @@ namespace {
 constexpr std::int64_t kConnectDebounceUs = 40000;
 constexpr std::int64_t kUnplugDebounceUs = 120000;
 constexpr std::uint32_t kCooldownMs = 750;
+// A device that never enumerates must not indefinitely suppress Bluetooth.
+constexpr std::uint32_t kEnumerationTimeoutMs = 6000;
 constexpr std::uint32_t kFeedbackMs = 200;
 
 repeating_timer_t sof_timer{};
@@ -32,6 +34,9 @@ bool ever_mounted = false;
 bool probing_line = false;
 bool checking_unplug = false;
 bool bt_suspended = false;
+// A failed enumeration cannot retry until the USB lines return to SE0;
+// otherwise a noisy/floating D+ pin can repeatedly steal Bluetooth.
+bool wait_for_detach_after_failure = false;
 std::uint32_t host_started_ms = 0;
 absolute_time_t line_high_since{};
 absolute_time_t unplug_since{};
@@ -64,6 +69,14 @@ void stop_host() {
     checking_unplug = false;
     ever_mounted = false;
     ready_again_ms = to_ms_since_boot(get_absolute_time()) + kCooldownMs;
+    // PIO owned these pins during enumeration. Restore ordinary input mode
+    // and pull-downs before rearming GPIO attach monitoring.
+    gpio_init(PIO_USB_DP_PIN);
+    gpio_set_dir(PIO_USB_DP_PIN, GPIO_IN);
+    gpio_pull_down(PIO_USB_DP_PIN);
+    gpio_init(PIO_USB_DP_PIN + 1);
+    gpio_set_dir(PIO_USB_DP_PIN + 1, GPIO_IN);
+    gpio_pull_down(PIO_USB_DP_PIN + 1);
     board_api_usbh::enable_host_line_irq_monitoring();
 #if defined(CONFIG_EN_BLUETOOTH)
     if (bt_suspended) {
@@ -91,6 +104,12 @@ void poll() {
         // Before enumeration the two pins are GPIO inputs with 15k pull-downs.
         // Either D+ (full-speed) or D- (low-speed) going high indicates a device.
         const bool line_high = gpio_get(PIO_USB_DP_PIN) || gpio_get(PIO_USB_DP_PIN + 1);
+        if (wait_for_detach_after_failure) {
+            if (line_high) return; // Require a fresh plug event after a failed enumeration.
+            wait_for_detach_after_failure = false;
+            probing_line = false;
+            return;
+        }
         if (!line_high) { probing_line = false; return; }
         if (!probing_line) { probing_line = true; line_high_since = now; return; }
         if (absolute_time_diff_us(line_high_since, now) < kConnectDebounceUs) return;
@@ -131,6 +150,15 @@ void poll() {
     tuh_task();
     const bool mounted = configured_device_present();
     if (mounted) ever_mounted = true;
+    // Don't trust HCD's physical-line status when no device ever mounted.
+    // In particular, a phantom idle-high on an unpopulated GP9/GP10 host
+    // must not leave Bluepad32 pairing disabled indefinitely.
+    if (!ever_mounted &&
+        static_cast<std::uint32_t>(now_ms - host_started_ms) >= kEnumerationTimeoutMs) {
+        wait_for_detach_after_failure = true;
+        stop_host(); // Includes BT pairing restoration.
+        return;
+    }
     const bool hcd_connected = hcd_port_connect_status(BOARD_TUH_RHPORT);
     board_api_usbh::store_host_line_connected(hcd_connected);
     // Once a device has mounted, TinyUSB's mount state is authoritative.
