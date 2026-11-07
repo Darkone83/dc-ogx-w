@@ -1,5 +1,6 @@
 #include "NetworkService/UdpDiscovery.h"
 #include "NetworkService/DiscoveryProtocol.h"
+#include "Board/Config.h"
 
 #include <cstring>
 #include "lwip/ip.h"
@@ -25,8 +26,13 @@ void emit(const ip_addr_t* destination, std::uint16_t port, netif* iface) {
     char local_address[16]{};
     ip4addr_ntoa_r(netif_ip4_addr(iface), local_address, sizeof(local_address));
     char payload[160]{};
+#if defined(CONFIG_OGXM_BOARD_PI_PICO2W)
+    constexpr const char* board = "pico2_w";
+#else
+    constexpr const char* board = "pico_w";
+#endif
     const std::size_t length = DiscoveryProtocol::make_announcement(
-        payload, sizeof(payload), id, "pico_w", local_address);
+        payload, sizeof(payload), id, board, local_address);
     if (!length) return;
     pbuf* packet = pbuf_alloc(PBUF_TRANSPORT, static_cast<u16_t>(length), PBUF_RAM);
     if (!packet) return;

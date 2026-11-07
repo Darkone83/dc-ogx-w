@@ -15,7 +15,7 @@ constexpr std::size_t PAGE_SIZE = 256;
 constexpr std::size_t SECTOR_SIZE = 4096;
 constexpr std::uint32_t SESSION_TIMEOUT_MS = 120000;
 
-enum class Board : std::uint32_t { PicoW = 1, PicoW2023 = 2 };
+enum class Board : std::uint32_t { PicoW = 1, PicoW2023 = 2, Pico2W = 3 };
 
 struct ImageHeader {
     Board board{};

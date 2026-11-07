@@ -1,11 +1,20 @@
 # SDK 2.3+ has modular linker scripts and a supported override API. Keep its
 # startup, TLS and section layout, overriding only our stack/storage placement.
 if(COMMAND pico_add_linker_script_override_path AND COMMAND pico_set_linker_script_var)
-    pico_set_linker_script_var(dc-ogx-w RAM_LENGTH 245760) # 240 KiB; top 16 KiB are stacks.
+    if(PICO_BOARD STREQUAL "pico2_w")
+        pico_set_linker_script_var(dc-ogx-w RAM_LENGTH 507904) # 496 KiB; top 16 KiB are stacks.
+        pico_add_linker_script_override_path(dc-ogx-w "${CMAKE_CURRENT_LIST_DIR}/linker/rp2350"
+            FILES memory_extra.incl)
+    else()
+        pico_set_linker_script_var(dc-ogx-w RAM_LENGTH 245760) # 240 KiB; top 16 KiB are stacks.
+    endif()
     pico_add_linker_script_override_path(dc-ogx-w "${CMAKE_CURRENT_LIST_DIR}/linker"
         FILES memory_extra.incl sections_stack.incl section_extra_post_end.incl)
     message(STATUS "dc-ogx-w: modular linker overrides (8 KiB stacks, 1000 KiB OTA image, 24 KiB settings)")
 else()
+    if(PICO_BOARD STREQUAL "pico2_w")
+        message(FATAL_ERROR "The Pico 2 W baseline requires Pico SDK 2.3.0 or newer modular linker support")
+    endif()
     # SDK 2.1/2.2 use the original single-file linker script.
     set(_sdk_linker "${PICO_SDK_PATH}/src/rp2_common/pico_crt0/rp2040/memmap_default.ld")
     if(NOT EXISTS "${_sdk_linker}")

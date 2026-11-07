@@ -53,7 +53,9 @@ constexpr unsigned kWidth = 128;
 constexpr unsigned kHeight = 32;       // Actual panel, not a scaled 128x64 scene.
 constexpr unsigned kPages = 4;
 // Queue fixed packets through the I2C FIFO; the service never waits for the bus.
-constexpr unsigned kBurst = 16;
+// Fill the existing 32-byte packet (one control byte + 31 display bytes).
+// advance_transfer still queues at most 16 FIFO writes per visit.
+constexpr unsigned kBurst = 31;
 static_assert(kBurst+1<=32, "OLED packet exceeds its fixed transfer buffer");
 constexpr std::uint32_t kProbeMs = 10000;
 constexpr std::uint32_t kSplashMs = 1550;
@@ -61,7 +63,8 @@ constexpr std::uint32_t kIpMs = 12000;
 constexpr std::uint32_t kProfileMs = 4000;
 constexpr std::uint32_t kNetworkMs = 3300;
 constexpr std::uint32_t kInputMs = 4400;
-constexpr unsigned kWipeSteps = 4;
+constexpr unsigned kWipeSteps = 6;
+constexpr std::uint32_t kWipeStepMs = 45;
 static_assert(DC_OGX_OLED_ADDRESS == 0x3c || DC_OGX_OLED_ADDRESS == 0x3d, "Invalid SSD1306 address");
 static_assert(DC_OGX_OLED_CONTRAST >= 0 && DC_OGX_OLED_CONTRAST <= 255, "Invalid OLED contrast");
 
@@ -529,20 +532,21 @@ void tiny_wifi(int x,int y,bool active,bool joining,std::uint8_t motion) {
     pixel(x+3,y+6);
 }
 // Full SSID including the unique device suffix; never substitute a fixed name.
-// The 5x7 font can fit 20 glyphs per row; even a maximum 32-byte SSID fits.
+// Keep the existing Wi-Fi glyph visible; two 16-character rows fit a full SSID.
 void draw_ap_ssid(const char* ssid) {
     if (!ssid || !*ssid) return;
-    constexpr std::size_t kCharsPerRow = 20;
+    constexpr std::size_t kCharsPerRow = 16;
+    glyph16(OledGlyphs::Icon::Wifi,2,15);
     const std::size_t length = std::strlen(ssid);
     if (length <= kCharsPerRow) {
-        micro_text(34,15,"JOIN WI-FI");
-        micro_text((128-static_cast<int>(length*6))/2,23,ssid);
+        micro_text(47,15,"JOIN WI-FI");
+        micro_text(23+(104-static_cast<int>(length*6))/2,24,ssid);
     } else {
         char top[kCharsPerRow+1]{};
         std::memcpy(top,ssid,kCharsPerRow);
-        micro_text((128-static_cast<int>(kCharsPerRow*6))/2,15,top);
-        micro_text((128-static_cast<int>((length-kCharsPerRow)*6))/2,
-                   23,ssid+kCharsPerRow);
+        micro_text(23+(104-static_cast<int>(kCharsPerRow*6))/2,15,top);
+        micro_text(23+(104-static_cast<int>((length-kCharsPerRow)*6))/2,
+                   24,ssid+kCharsPerRow);
     }
 }
 void draw_ip(const char* ip,bool station,bool ready,std::uint32_t state,
@@ -565,15 +569,17 @@ void draw_ip(const char* ip,bool station,bool ready,std::uint32_t state,
         const char* ssid=NetworkService::ssid();
         if (ssid && *ssid) { draw_ap_ssid(ssid); return; }
     }
+    glyph16(OledGlyphs::Icon::Wifi,2,15);
     if (!ready || !station || !valid_ipv4(ip)) {
-        draw_text(4,16,ready ? "NO IP" : "CONNECT",kCompact);
+        draw_text(24,16,ready ? "NO IP" : "CONNECT",kCompact);
         // Three breathing pixels make an otherwise static wait screen feel alive.
         for (int i=0; i<3; ++i) if (static_cast<unsigned>(i)==motion%3u)
             fill_rect(104+i*7,21,3,3);
         return;
     }
-    const int left=(128-string_width(kCompact,ip))/2;
-    draw_text(left,17,ip,kCompact);
+    const int width=string_width(kCompact,ip);
+    if (width<=102) draw_text(23+(104-width)/2,17,ip,kCompact);
+    else micro_text(23+(104-micro_width(ip))/2,20,ip);
     // Accent tick shifts very slowly without disturbing IP readability.
     const int scan=static_cast<int>((motion%8u)*14u)+9;
     line(scan,31,scan+5,31);
@@ -592,11 +598,14 @@ void draw_profile(std::uint32_t state,std::uint8_t motion) {
     const int w=string_width(num_font,num);
     draw_text((43-w)/2,number<100?5:8,num,num_font,false);
     micro_text(49,2,"PROFILE");
-    line(49,11,125,11);
+    glyph16(OledGlyphs::Icon::Profile,110,0);
+    line(49,11,103,11);
     const char* mode= !usb ? "USB OFF" : driver==1u ? "OGX" : driver==4u ? "XID" : "USB";
     draw_text(49,13,mode,kCompact);
-    micro_text(49,25,!usb?"DISCONNECTED":owned?(fresh?"INPUT LIVE":"INPUT WAIT"):"STANDBY");
-    if (owned && fresh) sparkle(120,4,motion);
+    const bool pad_connected=(input_sources.load(std::memory_order_acquire)&3u)!=0u;
+    micro_text(49,25,!usb?"DISCONNECTED":owned?(fresh?"INPUT LIVE":"INPUT WAIT"):
+               pad_connected?"PAD CONNECTED":"STANDBY");
+    if (owned && fresh) sparkle(98,4,motion);
 }
 const char* input_name(InputKind kind) {
     switch (kind) {
@@ -625,33 +634,18 @@ void draw_input_page(bool wired, std::uint32_t inputs, std::uint32_t state,
     std::snprintf(tag, sizeof(tag), "P%u", profile);
     micro_text(128 - micro_width(tag) - 2, 1, tag);
     line(2, 11, 125, 11);
-    if (string_width(kCompact, label) <= 124)
-        draw_text((128 - string_width(kCompact, label)) / 2, 14, label, kCompact);
-    else micro_text((128 - micro_width(label)) / 2, 18, label);
-    micro_text(3, 26, wired ? "WIRED HOST" : (inputs & 4u) ? "BLUETOOTH LE" : "CLASSIC BT");
+    glyph16(wired?OledGlyphs::Icon::Usb:OledGlyphs::Icon::Bluetooth,2,14);
+    if (string_width(kCompact, label) <= 102)
+        draw_text(23+(104 - string_width(kCompact, label)) / 2, 12, label, kCompact);
+    else micro_text(23+(104 - micro_width(label)) / 2, 17, label);
+    // All seven footer rows fit the 32px panel, clear of the controller name.
+    micro_text(24, 25, wired ? "WIRED HOST" : (inputs & 4u) ? "BLUETOOTH LE" : "CLASSIC BT");
     if ((motion & 1u) == 0u) fill_rect(123, 28, 3, 3);
-}
-void network_emblem(int x,int y,std::uint8_t motion,bool connecting) {
-    // A hand-drawn large radio/radar glyph, with optional moving radar beam.
-    line(x+5,y+19,x+19,y+19);
-    line(x+7,y+22,x+17,y+22);
-    fill_rect(x+11,y+16,3,3);
-    const bool outer=!connecting || motion%3u>=2;
-    const bool middle=!connecting || motion%3u>=1;
-    if (outer) {
-        line(x+1,y+8,x+5,y+4); line(x+5,y+4,x+11,y+2);
-        line(x+13,y+2,x+19,y+4); line(x+19,y+4,x+23,y+8);
-    }
-    if (middle) {
-        line(x+5,y+12,x+9,y+8); line(x+9,y+8,x+12,y+7);
-        line(x+12,y+7,x+15,y+8); line(x+15,y+8,x+19,y+12);
-    }
-    line(x+9,y+15,x+12,y+12); line(x+12,y+12,x+15,y+15);
 }
 void draw_network(const NetworkService::Transport::Status& network,std::uint8_t motion) {
     const bool station = network.station_connected && network.station_ip && *network.station_ip;
     const bool waiting = network.station_configured && !station;
-    network_emblem(5,2,motion,network.station_joining || !network.ready);
+    glyph16(OledGlyphs::Icon::Wifi,9,8);
     line(35,2,35,29);
     draw_text(42,0,station || waiting ? "LAN" : "AP",kText);
     // Bold white bottom ribbon is deliberately asymmetric to the home/profile.
@@ -706,10 +700,10 @@ void draw_firmware(FirmwareUpdate::DisplayPhase phase,std::uint8_t percent,std::
         draw_text(39,14,"ERROR",kCompact);
         return;
     }
-    micro_text(3,2,"FIRMWARE");
-    if (phase==DisplayPhase::Receiving) draw_text(3,11,"RECEIVE",kCompact);
-    else if (phase==DisplayPhase::Installing) draw_text(3,11,"INSTALL",kCompact);
-    else draw_text(3,11,"READY",kCompact);
+    glyph16(OledGlyphs::Icon::Update,3,9);
+    micro_text(25,2,"FIRMWARE");
+    micro_text(25,16,phase==DisplayPhase::Receiving?"RECEIVE":
+                         phase==DisplayPhase::Installing?"INSTALL":"READY");
     const unsigned shown=(phase==DisplayPhase::Receiving)?percent:100u;
     char number[6]{};
     std::snprintf(number,sizeof(number),"%u",shown>100?100:shown);
@@ -955,19 +949,6 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
             frame_dirty=true;
         }
     }
-    // Overlay scene numbers must not collide with Bluetooth/USB pages 4 and 5.
-    const std::uint8_t scene=overlay==2 ? 7u : overlay==1 ? 6u : page;
-    if (scene!=visible_scene) {
-        // Snapshot the *last frame* before replacing it. The 4-stage wipe
-        // operates entirely in RAM; never block service to perform a transition.
-        std::memcpy(wipe_source,fb,sizeof(fb));
-        visible_scene=scene;
-        wipe_style=scene==7?1u:scene==2?2u:scene==3?0u:scene==6?0u:2u;
-        wipe_step=1;
-        wiping=true;
-        next_wipe_step=now+145u;
-        frame_dirty=true;
-    }
     const std::uint32_t state=shared.load(std::memory_order_acquire);
     const std::uint32_t sources=input_sources.load(std::memory_order_acquire);
     if (sources!=previous_inputs) {
@@ -1052,17 +1033,31 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
         send_contrast(next);
         return;
     }
+    // Select the scene after connection events have selected their page, and
+    // only after the prior framebuffer is fully sent. Connection/update pages
+    // cut directly so a transition cannot hide a disconnect or urgent update.
+    const std::uint8_t scene=overlay==2 ? 7u : overlay==1 ? 6u : page;
+    if (!transfer_pending && scene!=visible_scene) {
+        wiping=scene!=4 && scene!=5 && scene!=7 &&
+               visible_scene!=4 && visible_scene!=5 && visible_scene!=7;
+        if (wiping) std::memcpy(wipe_source,fb,sizeof(fb));
+        visible_scene=scene;
+        wipe_style=scene==2?2u:scene==3?0u:scene==6?0u:2u;
+        wipe_step=1;
+        next_wipe_step=now+kWipeStepMs;
+        frame_dirty=true;
+    }
     // Don't advance the animation until all 512 bytes of the prior frame have
     // been transmitted. Every frame remains coherent even on a slow service loop.
     if (!transfer_pending && wiping && due(now,next_wipe_step)) {
         if (++wipe_step>=kWipeSteps) wiping=false;
-        next_wipe_step=now+145u;
+        next_wipe_step=now+kWipeStepMs;
         frame_dirty=true;
     }
     if (!transfer_pending && !wiping && due(now,next_motion)) {
         const std::uint32_t period=page==0 && overlay==0 ? 170u :
-            overlay==1 ? 430u : overlay==2 ? 460u :
-            page==3 ? 480u : page==2 ? 840u : 1220u;
+            overlay==1 ? 240u : overlay==2 ? 240u :
+            page==3 ? 320u : page==2 ? 840u : 1220u;
         next_motion=now+period;
         ++animation_frame;
         frame_dirty=true;

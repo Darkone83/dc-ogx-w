@@ -14,6 +14,9 @@
 #include <pico/flash.h>
 #include <pico/rand.h>
 #include <pico/stdlib.h>
+#if PICO_RP2350
+#include <boot/picoboot_constants.h>
+#endif
 
 namespace FirmwareUpdate::Platform {
 namespace {
@@ -21,6 +24,9 @@ namespace {
 #if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
 constexpr Board CURRENT_BOARD = Board::PicoW2023;
 constexpr const char* BOARD_NAME = "pico_w_2023";
+#elif defined(CONFIG_OGXM_BOARD_PI_PICO2W)
+constexpr Board CURRENT_BOARD = Board::Pico2W;
+constexpr const char* BOARD_NAME = "pico2_w";
 #else
 constexpr Board CURRENT_BOARD = Board::PicoW;
 constexpr const char* BOARD_NAME = "pico_w";
@@ -79,7 +85,11 @@ struct InstallContext {
     rom_flash_range_program_fn program;
     rom_flash_flush_cache_fn flush;
     rom_flash_enter_cmd_xip_fn enter_xip;
+#if PICO_RP2350
+    rom_reboot_fn reboot;
+#else
     rom_reset_usb_boot_fn usb_boot;
+#endif
     std::uint32_t image_size;
     alignas(4) std::uint8_t sector[SECTOR_SIZE];
 };
@@ -109,7 +119,11 @@ InstallContext install_context;
         const volatile std::uint8_t* target = reinterpret_cast<const volatile std::uint8_t*>(FLASH_BASE + offset);
         for (std::uint32_t i = 0; i < SECTOR_SIZE; ++i) {
             if (target[i] != context->sector[i]) {
+#if PICO_RP2350
+                context->reboot(REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL | REBOOT2_FLAG_NO_RETURN_ON_SUCCESS, 0, 0, 0);
+#else
                 context->usb_boot(0, 0); // Recovery from ROM, never damaged app.
+#endif
                 while (true) { __asm volatile("nop"); }
             }
         }
@@ -138,10 +152,19 @@ const char* install(const ImageHeader& header) {
     install_context.program = reinterpret_cast<rom_flash_range_program_fn>(rom_func_lookup(ROM_FUNC_FLASH_RANGE_PROGRAM));
     install_context.flush = reinterpret_cast<rom_flash_flush_cache_fn>(rom_func_lookup(ROM_FUNC_FLASH_FLUSH_CACHE));
     install_context.enter_xip = reinterpret_cast<rom_flash_enter_cmd_xip_fn>(rom_func_lookup(ROM_FUNC_FLASH_ENTER_CMD_XIP));
+#if PICO_RP2350
+    install_context.reboot = reinterpret_cast<rom_reboot_fn>(rom_func_lookup(ROM_FUNC_REBOOT));
+#else
     install_context.usb_boot = reinterpret_cast<rom_reset_usb_boot_fn>(rom_func_lookup(ROM_FUNC_RESET_USB_BOOT));
+#endif
     install_context.image_size = header.image_size;
     if (!install_context.connect || !install_context.exit_xip || !install_context.erase ||
-        !install_context.program || !install_context.flush || !install_context.enter_xip || !install_context.usb_boot) {
+        !install_context.program || !install_context.flush || !install_context.enter_xip ||
+#if PICO_RP2350
+        !install_context.reboot) {
+#else
+        !install_context.usb_boot) {
+#endif
         return "bootrom_api_unavailable";
     }
     board_api::usb::disconnect_all(); // Stops Core1, timers and native USB first.

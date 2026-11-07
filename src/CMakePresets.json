@@ -49,6 +49,16 @@
             "cacheVariables": {
                 "DC_OGX_USB_HOST_ENABLED": "ON"
             }
+        },
+        {
+            "name": "pico2-w",
+            "displayName": "Pico 2 W (current firmware baseline)",
+            "inherits": "pico-w-pio",
+            "binaryDir": "${sourceDir}/build/pico2-w",
+            "cacheVariables": {
+                "PICO_BOARD": "pico2_w",
+                "PICO_PLATFORM": "rp2350-arm-s"
+            }
         }
     ],
     "buildPresets": [
@@ -67,6 +77,10 @@
         {
             "name": "pico-w-pio",
             "configurePreset": "pico-w-pio"
+        },
+        {
+            "name": "pico2-w",
+            "configurePreset": "pico2-w"
         }
     ]
 }

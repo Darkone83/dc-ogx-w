@@ -4,6 +4,13 @@ The normal build emits both `dc-ogx-w.uf2` and a board-specific update package:
 
 * `dc-ogx-w-pico_w_2023.ogxw` for the ESP8285 clone.
 * `dc-ogx-w-pico_w.ogxw` for an official Raspberry Pi Pico W.
+* `dc-ogx-w-pico2_w.ogxw` for an official Raspberry Pi Pico 2 W (Arm).
+
+The `pico2-w` CMake configure/build preset builds the current firmware feature
+set with the same carrier pins: USB host GP9/GP10, OLED GP14/GP15 and LED GP8.
+It uses Pico SDK 2.3.0 or newer and a separate `build/pico2-w` directory.
+Initial installation on Pico 2 W requires its own generated `.uf2`; Pico W
+firmware and update packages cannot be used on Pico 2 W, or vice versa.
 
 Install this updater-enabled firmware once using the ordinary BOOTSEL `.uf2`
 process. Subsequent firmware builds can be uploaded from the WebUI's firmware
@@ -11,12 +18,12 @@ panel. Select the `.ogxw` package matching the physical board. The WebUI release
 remote control for the update and transfers one bounded chunk at a time. After
 the entire staged image validates, explicitly choose **Install and reboot**.
 
-The installed RP2040 firmware is updated. This does **not** reflash the separate
+The installed controller firmware is updated. This does **not** reflash the separate
 ESP8285 radio, and it does not turn a clone into an official Pico W.
 
 ## Flash layout and recovery
 
-Both builds conservatively use 2 MiB of flash. The running image is limited to
+All three builds conservatively use 2 MiB of flash. The running image is limited to
 1000 KiB; a separate 1000 KiB staging area starts at offset `0x100000`. The final
 24 KiB remain reserved for Bluetooth and user settings. Both the linker and
 package generator reject images too large for this layout. Wi-Fi credentials,
@@ -29,14 +36,15 @@ expire after two minutes without an accepted operation. There is no persistent
 
 **Keep the board powered while installing.** After you confirm installation,
 the installer stops USB and the radio core, checks the complete staged image,
-and copies it from an SRAM routine using RP2040 ROM flash functions. It reads
+and copies it from an SRAM routine using the selected chip's ROM flash functions. It reads
 back each destination sector, then reboots. A failed readback enters ROM USB
 recovery. This is staged replacement, not an A/B bootloader: power loss during
 the final copy can require BOOTSEL and the normal `.uf2` to recover. No rollback
 or uninterrupted controller operation is promised during an update.
 
-Update packages contain board/layout markers, RP2040 boot vectors, the boot2
-checksum and CRC32 integrity checks. They are **not cryptographically signed**;
+Update packages contain board/layout markers, boot vectors and CRC32 integrity
+checks. RP2040 images also require the boot2 checksum; RP2350 images require
+the SDK's Arm-secure PICOBIN boot block. They are **not cryptographically signed**;
 use firmware you built or trust. The updater is intended for the local WebUI.
 
 ## Protocol for Python or other clients
@@ -66,8 +74,8 @@ execution that pauses Core1. Network callbacks only copy a bounded command into
 a mailbox. The integration must inhibit controller output while `active()` is
 true and initialize flash-safe execution on both cores.
 
-Before releasing an update, verify the board marker, package integrity,
-version and image size. Test rejected wrong-board or corrupted packages,
-interrupted transfers, cancellation and successful installation on each
-physical board. Automated firmware-update tests may be run from a separate
-development checkout when available; they are not included in this repository.
+Run portable validation with `python tests/firmware_update/run.py`. The tests
+cover wrong-board and malformed manifests, boot vectors, checksums, incomplete
+and out-of-order transfers, duplicate chunks, flash failures, cancellation and
+timeout rollover. These checks do not replace a physical interrupted-transfer
+and successful-install test on each board.

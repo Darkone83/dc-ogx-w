@@ -768,6 +768,8 @@ size_t network_json(char *output, size_t capacity) {
 #endif
 #if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     constexpr const char *board = "pico_w_2023";
+#elif defined(CONFIG_OGXM_BOARD_PI_PICO2W)
+    constexpr const char *board = "pico2_w";
 #else
     constexpr const char *board = "pico_w";
 #endif

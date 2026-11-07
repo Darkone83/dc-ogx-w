@@ -1889,7 +1889,7 @@
         controlEpoch = 0, recovering = false, gamepadNeedsNeutral = true,
         lastPingAt = 0, pingId = 0, pingSupported = false,
         bluetoothSupported = null, physicalSupported = null, inputMode = "physical", modePending = false, modeBusy = false, modeSelectionDirty = false,
-        calibration = null, calibrationBusy = false, calibrationTimer = null;
+        calibration = null, calibrationBusy = false, calibrationTimer = null, calibrationLoading = false;
       let maintenanceBusy = false, remoteMaintenance = false, deviceLoaded = false,
         deviceLoading = false, updateActionBusy = false, updateToken = null,
         uploadCancelled = false, uploadInFlight = false, wifiRestarting = false,
@@ -1941,28 +1941,39 @@
         const request = async () => {
           for (let attempt = 0; ; ++attempt) {
             if (stillNeeded && !stillNeeded()) throw new Error("Control request cancelled.");
-            const controller = new AbortController(),
-              timer = setTimeout(() => controller.abort(), timeoutMs);
+            const controller = new AbortController();
+            let timer;
             try {
-              const r = await fetch(path, {
-                method: requestBody === undefined ? "GET" : "POST",
-                headers: requestBody === undefined ? {} : { "Content-Type": "application/json" },
-                body: requestBody,
-                cache: "no-store",
-                signal: controller.signal,
+              const response = (async () => {
+                const r = await fetch(path, {
+                  method: requestBody === undefined ? "GET" : "POST",
+                  headers: requestBody === undefined ? {} : { "Content-Type": "application/json" },
+                  body: requestBody,
+                  cache: "no-store",
+                  signal: controller.signal,
+                });
+                let result;
+                try { result = await r.json(); }
+                catch (_) { throw new Error("The adapter returned an unreadable response."); }
+                if (!result || typeof result !== "object")
+                  throw new Error("The adapter returned an unreadable response.");
+                if (!r.ok || result.ok === false) {
+                  const error = new Error(errorText(result.error || result.message || "Request failed (" + r.status + ")."));
+                  error.status = r.status;
+                  error.code = result.error;
+                  throw error;
+                }
+                return result;
+              })();
+              // Bound both the response and its body. Some suspended browsers
+              // do not settle an aborted fetch promptly; don't strand the queue.
+              const deadline = new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                  reject(new Error("The request timed out. Check the adapter connection."));
+                  controller.abort();
+                }, timeoutMs);
               });
-              let result;
-              try { result = await r.json(); }
-              catch (_) { throw new Error("The adapter returned an unreadable response."); }
-              if (!result || typeof result !== "object")
-                throw new Error("The adapter returned an unreadable response.");
-              if (!r.ok || result.ok === false) {
-                const error = new Error(errorText(result.error || result.message || "Request failed (" + r.status + ")."));
-                error.status = r.status;
-                error.code = result.error;
-                throw error;
-              }
-              return result;
+              return await Promise.race([response, deadline]);
             } catch (error) {
               // service_busy explicitly rejects the operation before it is
               // accepted. Never blindly repeat an ambiguous POST/network error.
@@ -2863,19 +2874,32 @@
       }
       async function loadCalibration() {
         if (calibrationTimer !== null) { clearTimeout(calibrationTimer); calibrationTimer = null; }
-        if (activeTab !== "calibration" || bluetoothSupported !== true || calibrationBusy) return;
+        if (document.hidden || activeTab !== "calibration" || bluetoothSupported !== true || calibrationBusy || calibrationLoading) return;
+        // Live telemetry yields to settings/control requests already in flight.
+        if (maintenanceBusy || queuedApiRequests > 0) { scheduleCalibrationPoll(250); return; }
+        calibrationLoading = true;
         try {
           const requestAt = performance.now();
           const snapshot = await api("/api/calibration");
+          if (document.hidden || activeTab !== "calibration" || calibrationBusy) return;
           calibration = snapshot;
           acceptCalibrationSnapshot(snapshot, performance.now() - requestAt);
           renderCalibration();
         }
-        catch (error) { deviceMessage("calibration-message", error.message, true); }
-        finally {
-          if (activeTab === "calibration" && bluetoothSupported === true)
-            calibrationTimer = setTimeout(loadCalibration, 250);
+        catch (error) {
+          if (!document.hidden && activeTab === "calibration" && !calibrationBusy)
+            deviceMessage("calibration-message", error.message, true);
         }
+        finally {
+          calibrationLoading = false;
+          scheduleCalibrationPoll(250);
+        }
+      }
+      function scheduleCalibrationPoll(delay) {
+        if (calibrationTimer !== null) clearTimeout(calibrationTimer);
+        calibrationTimer = null;
+        if (!document.hidden && activeTab === "calibration" && bluetoothSupported === true && !calibrationBusy)
+          calibrationTimer = setTimeout(loadCalibration, delay);
       }
       async function calibrationAction(action) {
         if (calibrationBusy || modeBusy || modePending || inputMode === "wifi" || editing) return;
@@ -4235,72 +4259,108 @@
       }
       let statusFailures = 0;
       let lastGoodStatusAt = 0;
-      async function pollStatus() {
-        // A failed telemetry poll should not keep the next profile or LED
-        // request waiting behind it on the ESP's serialized AT transport.
-        if (!maintenanceBusy && queuedApiRequests > 0 && activeTab !== "calibration") {
-          setTimeout(pollStatus, 1500);
-          return;
-        }
-        if (maintenanceBusy) {
-          if (!uploadInFlight && !wifiRestarting && !ledRestarting && !oledRestarting && !installWaiting && !updateActionBusy && !deviceLoading && deviceLoaded) {
-            try {
-              const statusUnknown = updaterStatus === null;
-              updaterStatus = await api("/api/update");
-              if (!updaterStatus.active && !updaterStatus.processing) {
-                maintenanceBusy = remoteMaintenance = false;
-                updateToken = null;
-                deviceMessage("update-message", updaterStatus.error
-                  ? errorText(updaterStatus.error) + ". The current firmware is still running."
-                  : "Update session ended. The adapter is ready.", Boolean(updaterStatus.error));
-              } else if (statusUnknown) {
-                deviceMessage("update-message", "The adapter confirmed an active update session. This tab has no session token and cannot cancel it. Waiting for it to expire; status is checked automatically.", true);
-              }
-              deviceButtons();
-            } catch (_) { /* Keep the guard and retry on the next status poll. */ }
-          }
-          setTimeout(pollStatus, 1500);
-          return;
-        }
-        try {
-          const s = await api("/api/status", undefined, 6000);
-          statusFailures = 0;
-          lastGoodStatusAt = performance.now();
-          const becameOnline = !online;
-          online = true;
-          $("connection-chip").classList.add("online");
-          $("connection-text").textContent = "Connected";
-          updateStatus(s);
-          if (becameOnline && token === null && !connecting && !controlWanted)
-            message("Ready. Take control when you want to send input.");
-        } catch (e) {
-          const busyReply = e.status === 503 && ["service_busy", "led_busy"].includes(e.code);
-          ++statusFailures;
-          const controlConnected = token !== null && ws && ws.readyState === WebSocket.OPEN;
-          const recentlyHealthy = online && lastGoodStatusAt &&
-            performance.now() - lastGoodStatusAt < 15000 && statusFailures <= 2;
-          // A single transient status failure does not mean the adapter or control
-          // stream disconnected. The periodic telemetry request is not a heartbeat.
-          if (!busyReply && statusFailures >= 3 && !controlConnected) online = false;
-          $("connection-chip").classList.toggle("online", online);
-          $("connection-text").textContent = wifiScanBusy ? "Scanning Wi-Fi"
-            : recentlyHealthy || controlConnected ? "Connected"
-            : busyReply ? "Status delayed" : "Offline";
-          $("footer-status").textContent = recentlyHealthy
-            ? "Connected · telemetry retrying"
-            : controlConnected ? "Control connected · telemetry delayed"
-            : wifiScanBusy ? "Wi-Fi scan in progress · waiting for status"
-            : busyReply ? "Adapter responding · status delayed" : "Adapter unavailable";
-          if (!recentlyHealthy && lastStatus) deviceMessage("device-information-message",
-            "Live status is delayed. Showing the last received board information.");
-          // Only advise reconnecting after sustained failures, not on one
-          // missed request while another control or calibration task is active.
-          if (!recentlyHealthy && !controlConnected && !connecting && !controlWanted && !wifiScanBusy && !busyReply)
-            message("Connect to the adapter’s Wi-Fi or your saved network, then keep this page open.");
-        }
-        setButtons();
-        setTimeout(pollStatus, statusFailures ? 6000 : token === null ? 3500 : 5000);
+      let statusPollTimer = null, statusPolling = false, statusRefreshPending = false;
+      function scheduleStatusPoll(delay) {
+        if (statusPollTimer !== null) clearTimeout(statusPollTimer);
+        statusPollTimer = null;
+        if (!document.hidden) statusPollTimer = setTimeout(pollStatus, delay);
       }
+      async function pollStatus() {
+        if (statusPollTimer !== null) { clearTimeout(statusPollTimer); statusPollTimer = null; }
+        if (document.hidden || statusPolling) return;
+        statusPolling = true;
+        let nextPoll = 1500;
+        try {
+          // A failed telemetry poll should not keep the next profile or LED
+          // request waiting behind it on the ESP's serialized AT transport.
+          if (!maintenanceBusy && queuedApiRequests > 0 && activeTab !== "calibration") {
+            return;
+          }
+          if (maintenanceBusy) {
+            if (!uploadInFlight && !wifiRestarting && !ledRestarting && !oledRestarting && !installWaiting && !updateActionBusy && !deviceLoading && deviceLoaded) {
+              try {
+                const statusUnknown = updaterStatus === null;
+                updaterStatus = await api("/api/update");
+                if (!updaterStatus.active && !updaterStatus.processing) {
+                  maintenanceBusy = remoteMaintenance = false;
+                  updateToken = null;
+                  deviceMessage("update-message", updaterStatus.error
+                    ? errorText(updaterStatus.error) + ". The current firmware is still running."
+                    : "Update session ended. The adapter is ready.", Boolean(updaterStatus.error));
+                } else if (statusUnknown) {
+                  deviceMessage("update-message", "The adapter confirmed an active update session. This tab has no session token and cannot cancel it. Waiting for it to expire; status is checked automatically.", true);
+                }
+                deviceButtons();
+              } catch (_) { /* Keep the guard and retry on the next status poll. */ }
+            }
+            return;
+          }
+          try {
+            const s = await api("/api/status", undefined, 6000);
+            statusFailures = 0;
+            lastGoodStatusAt = performance.now();
+            const becameOnline = !online;
+            online = true;
+            $("connection-chip").classList.add("online");
+            $("connection-text").textContent = "Connected";
+            updateStatus(s);
+            if (becameOnline && token === null && !connecting && !controlWanted)
+              message("Ready. Take control when you want to send input.");
+          } catch (e) {
+            const busyReply = e.status === 503 && ["service_busy", "led_busy"].includes(e.code);
+            ++statusFailures;
+            const controlConnected = token !== null && ws && ws.readyState === WebSocket.OPEN;
+            const recentlyHealthy = online && lastGoodStatusAt &&
+              performance.now() - lastGoodStatusAt < 15000 && statusFailures <= 2;
+            // A single transient status failure does not mean the adapter or control
+            // stream disconnected. The periodic telemetry request is not a heartbeat.
+            if (!busyReply && statusFailures >= 3 && !controlConnected) online = false;
+            $("connection-chip").classList.toggle("online", online);
+            $("connection-text").textContent = wifiScanBusy ? "Scanning Wi-Fi"
+              : recentlyHealthy || controlConnected ? "Connected"
+              : busyReply ? "Status delayed" : "Offline";
+            $("footer-status").textContent = recentlyHealthy
+              ? "Connected · telemetry retrying"
+              : controlConnected ? "Control connected · telemetry delayed"
+              : wifiScanBusy ? "Wi-Fi scan in progress · waiting for status"
+              : busyReply ? "Adapter responding · status delayed" : "Adapter unavailable";
+            if (!recentlyHealthy && lastStatus) deviceMessage("device-information-message",
+              "Live status is delayed. Showing the last received board information.");
+            // Only advise reconnecting after sustained failures, not on one
+            // missed request while another control or calibration task is active.
+            if (!recentlyHealthy && !controlConnected && !connecting && !controlWanted && !wifiScanBusy && !busyReply)
+              message("Connect to the adapter’s Wi-Fi or your saved network, then keep this page open.");
+          }
+          setButtons();
+          nextPoll = statusFailures ? 6000 : token === null ? 3500 : 5000;
+        } finally {
+          statusPolling = false;
+          scheduleStatusPoll(statusRefreshPending ? 0 : nextPoll);
+          statusRefreshPending = false;
+        }
+      }
+      function refreshTelemetry() {
+        if (document.hidden) return;
+        // Focus, pageshow and visibilitychange can arrive together. Coalesce
+        // them into one refresh without reloading settings or unsaved edits.
+        if (statusPolling) statusRefreshPending = true;
+        else scheduleStatusPoll(0);
+        scheduleCalibrationPoll(0);
+      }
+      function suspendTelemetry() {
+        if (statusPollTimer !== null) clearTimeout(statusPollTimer);
+        if (calibrationTimer !== null) clearTimeout(calibrationTimer);
+        statusPollTimer = calibrationTimer = null;
+        statusRefreshPending = false;
+      }
+      window.addEventListener("focus", refreshTelemetry);
+      window.addEventListener("pageshow", refreshTelemetry);
+      window.addEventListener("online", refreshTelemetry);
+      window.addEventListener("pagehide", suspendTelemetry);
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) suspendTelemetry();
+        else refreshTelemetry();
+      });
       $("host-label").textContent = location.host;
       let gamepadAllowed = typeof navigator.getGamepads === "function";
       if (gamepadAllowed) {

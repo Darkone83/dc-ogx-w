@@ -86,8 +86,11 @@ if(DC_OGX_USB_HOST_ENABLED)
 endif()
 
 # Board capabilities are fixed by the hardware, not independent feature toggles.
-set(SYSCLOCK_KHZ 240000 CACHE STRING "RP2040 system clock in kHz")
-if(PICO_BOARD STREQUAL "pico_w")
+set(SYSCLOCK_KHZ 240000 CACHE STRING "System clock in kHz (shared PIO USB timing)")
+if(PICO_BOARD STREQUAL "pico2_w")
+    set(DC_OGX_HAS_BLUETOOTH TRUE)
+    add_compile_definitions(CONFIG_OGXM_BOARD_PI_PICO2W=1 CONFIG_EN_BLUETOOTH=1)
+elseif(PICO_BOARD STREQUAL "pico_w")
     set(DC_OGX_HAS_BLUETOOTH TRUE)
     add_compile_definitions(CONFIG_OGXM_BOARD_PI_PICOW=1 CONFIG_EN_BLUETOOTH=1)
 elseif(PICO_BOARD STREQUAL "pico_w_2023")

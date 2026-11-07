@@ -10,6 +10,31 @@ std::uint32_t u32(const std::uint8_t* p) {
     return std::uint32_t(p[0]) | (std::uint32_t(p[1]) << 8) |
            (std::uint32_t(p[2]) << 16) | (std::uint32_t(p[3]) << 24);
 }
+// Pico SDK 2.3 Arm-secure RP2350 images start with a vector table and
+// advertise their boot format in a PICOBIN IMAGE_DEF within the first 4 KiB.
+// This replaces RP2040's boot2 CRC check; the whole-image CRC still applies.
+bool valid_rp2350_boot_block(const std::uint8_t* data, std::uint32_t size) {
+    const std::uint32_t limit=size<4096u?size:4096u;
+    for (std::uint32_t start=8; start+20u<=limit; start+=4u) {
+        if (u32(data+start)!=0xffffded3u || u32(data+start+4)!=0x10210142u) continue;
+        std::uint32_t item=start+4u;
+        while (item+12u<=limit) {
+            const auto word=u32(data+item);
+            const auto tag=word&0xffu;
+            const auto words=(word>>8)&((tag&0x80u)?0xffffu:0xffu);
+            if (tag==0xffu) {
+                if (words!=(item-start-4u)/4u || u32(data+item+8u)!=0xab123579u) break;
+                const auto relative=static_cast<std::int32_t>(u32(data+item+4u));
+                const auto next=static_cast<std::int64_t>(start)+relative;
+                return relative==0 || (next>=0 && next+16<=size &&
+                       u32(data+static_cast<std::uint32_t>(next))==0xffffded3u);
+            }
+            if (!words || words>(limit-item)/4u) break;
+            item+=words*4u;
+        }
+    }
+    return false;
+}
 }
 
 std::uint32_t crc32_update(std::uint32_t state, const std::uint8_t* data, std::size_t length) {
@@ -57,17 +82,21 @@ const char* parse_header(const std::uint8_t* data, std::size_t size, Board board
 const char* validate_image(const std::uint8_t* data, const ImageHeader& header, bool check_crc) {
     if (!data || header.image_size < 512 || header.image_size > MAX_IMAGE_SIZE) return "invalid_image_size";
     if (check_crc && crc32(data, header.image_size) != header.image_crc) return "image_checksum_mismatch";
-    if (boot2_crc(data) != u32(data + 252)) return "invalid_boot2_checksum";
-    const std::uint32_t stack = u32(data + 256);
-    const std::uint32_t reset = u32(data + 260);
-    if ((stack & 7u) || stack <= 0x20000000 || stack > 0x20042000) return "invalid_initial_stack";
-    if (!(reset & 1u) || (reset & ~1u) < FLASH_BASE + 264 ||
+    const bool rp2350=header.board==Board::Pico2W;
+    if (rp2350) {
+        if (!valid_rp2350_boot_block(data,header.image_size)) return "invalid_rp2350_boot_block";
+    } else if (boot2_crc(data) != u32(data + 252)) return "invalid_boot2_checksum";
+    const std::uint32_t vectors=rp2350?0u:256u;
+    const std::uint32_t stack = u32(data + vectors);
+    const std::uint32_t reset = u32(data + vectors + 4u);
+    if ((stack & 7u) || stack <= 0x20000000 || stack > (rp2350?0x20082000u:0x20042000u)) return "invalid_initial_stack";
+    if (!(reset & 1u) || (reset & ~1u) < FLASH_BASE + vectors + 8u ||
         (reset & ~1u) >= FLASH_BASE + header.image_size) return "invalid_reset_vector";
     // Do not accept a valid generic Pico UF2 repackaged under our filename.
     // This marker is emitted by this project's linked updater, with board and
     // flash layout IDs. It is compatibility checking, not signature security.
     bool found = false;
-    for (std::uint32_t offset = 264; offset + 32 <= header.image_size; ++offset) {
+    for (std::uint32_t offset = vectors + 8u; offset + 32 <= header.image_size; ++offset) {
         if (data[offset] != IDENTITY_MAGIC[0] ||
             std::memcmp(data + offset, IDENTITY_MAGIC, sizeof IDENTITY_MAGIC)) continue;
         if (u32(data + offset + 16) == static_cast<std::uint32_t>(header.board) &&

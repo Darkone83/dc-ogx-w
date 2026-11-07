@@ -1,0 +1,7 @@
+/* Same two 8 KiB stacks, at the top of RP2350's 512 KiB main SRAM.
+ * The SDK retains its separate scratch-bank regions and startup layout. */
+MEMORY
+{
+    STACK1(rwx) : ORIGIN = 0x2007c000, LENGTH = 8k
+    STACK0(rwx) : ORIGIN = 0x2007e000, LENGTH = 8k
+}
