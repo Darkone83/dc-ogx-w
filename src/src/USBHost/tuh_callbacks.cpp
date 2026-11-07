@@ -7,6 +7,7 @@
 #include "USBHost/HostDriver/XInput/tuh_xinput/tuh_xinput.h"
 #include "USBHost/HostManager.h"
 #include "OGXMini/OGXMini.h"
+#include "USBHost/HostDriver/VictrixGambit/VictrixGambit.h"
 
 usbh_class_driver_t const* usbh_app_driver_get_cb(uint8_t* driver_count) {
     *driver_count = 1;
@@ -45,6 +46,10 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 void tuh_xinput::mount_cb(uint8_t dev_addr, uint8_t instance, const tuh_xinput::Interface* interface) {
     HostManager& host_manager = HostManager::get_instance();
     HostDriverType host_type = HostManager::get_type(interface->dev_type);
+    uint16_t vid=0, pid=0;
+    tuh_vid_pid_get(dev_addr, &vid, &pid);
+    if (VictrixGambitHost::is_known_id(vid,pid)) host_type=HostDriverType::VICTRIX_GAMBIT;
+
 
     if (host_manager.setup_driver(host_type, HostManager::DriverClass::XINPUT, dev_addr, instance)) {
         OGXMini::host_mounted(true, host_type);

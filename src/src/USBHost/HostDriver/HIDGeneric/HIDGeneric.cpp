@@ -9,7 +9,7 @@
 
 void HIDHost::initialize(Gamepad& gamepad, uint8_t address, uint8_t instance, const uint8_t* report_desc, uint16_t desc_len)
 {
-    if (!report_desc || desc_len == 0)
+    if (!report_desc || desc_len == 0 || desc_len > report_desc_buffer_.size())
     {
         return;
     }
@@ -23,6 +23,10 @@ void HIDHost::initialize(Gamepad& gamepad, uint8_t address, uint8_t instance, co
 
 void HIDHost::process_report(Gamepad& gamepad, uint8_t address, uint8_t instance, const uint8_t* report, uint16_t len)
 {
+    if (!report || len == 0 || len > prev_report_in_.size() || !hid_joystick_) {
+        tuh_hid_receive_report(address, instance);
+        return;
+    }
     if (std::memcmp(prev_report_in_.data(), report, len) == 0)
     {
         tuh_hid_receive_report(address, instance);

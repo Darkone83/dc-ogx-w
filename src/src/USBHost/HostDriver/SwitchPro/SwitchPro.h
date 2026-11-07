@@ -19,7 +19,13 @@ public:
     void process_report(Gamepad& gamepad, uint8_t address, uint8_t instance, const uint8_t* report, uint16_t len) override;
     bool send_feedback(Gamepad& gamepad, uint8_t address, uint8_t instance) override;
 
+    ~SwitchProHost() override;
+    void disconnect_cb(Gamepad&, uint8_t, uint8_t) override;
+
     static bool is_switch2_usb_family(uint16_t vid, uint16_t pid);
+
+    bool initializing() const { return init_state_ != InitState::DONE; }
+    bool needs_service() const { return initializing() || switch2_ep_out_ != 0; }
 
 protected:
     enum class InitState
@@ -49,6 +55,18 @@ protected:
     std::array<uint8_t, 64> switch2_bulk_out_buf_{};
     std::array<uint8_t, 64> switch2_bulk_in_buf_{};
     unsigned switch2_pkt_idx_{0};
+    uint32_t switch2_next_packet_ms_{0};
+    bool switch2_bringup_pending_retry_{false};
+    uint32_t switch2_last_bulk_keepalive_ms_{0};
+    bool switch2_bulk_keepalive_busy_{false};
+    void switch2_poll_bringup();
+    void switch2_start_bringup();
+    void switch2_cancel_bringup();
+    static uintptr_t switch2_make_cb_token(uint8_t, uint8_t);
+    static SwitchProHost* switch2_lookup(uint8_t, uint8_t);
+    void switch2_send_bulk_keepalive();
+    static void switch2_keepalive_cb(tuh_xfer_s*);
+    void send_usb_disable_timeout(uint8_t, uint8_t);
 
     void switch2_start_config_read();
     bool switch2_parse_open_iface1(const uint8_t* desc_cfg, uint16_t buflen);

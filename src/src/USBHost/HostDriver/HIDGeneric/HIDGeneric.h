@@ -21,7 +21,7 @@ public:
     bool send_feedback(Gamepad& gamepad, uint8_t address, uint8_t instance) override;
 
 private:
-    std::array<uint8_t, 0x100> report_desc_buffer_;
+    std::array<uint8_t, 512> report_desc_buffer_{};
     uint16_t report_desc_len_{0};
     std::array<uint8_t, CFG_TUH_HID_EPIN_BUFSIZE> prev_report_in_{0};
     std::unique_ptr<HIDJoystick> hid_joystick_;

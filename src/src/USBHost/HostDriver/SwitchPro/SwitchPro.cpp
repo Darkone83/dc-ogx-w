@@ -1,11 +1,28 @@
 #include <cstring>
 #include <array>
 
+#include "Board/Config.h"
+#include "Board/board_api.h"
+#if defined(CONFIG_EN_USB_HOST)
+#include "pio_usb.h"
+#endif
+#include "USBHost/HostManager.h"
+
 #include "host/usbh.h"
 #include "class/hid/hid_host.h"
 #include "common/tusb_types.h"
 
 #include "USBHost/HostDriver/SwitchPro/SwitchPro.h"
+namespace {
+#if defined(CONFIG_EN_USB_HOST)
+void service_usb_host() { pio_usb_host_frame(); tuh_task(); }
+#else
+void service_usb_host() { tuh_task(); }
+#endif
+bool try_hid_out_id(uint8_t address, uint8_t instance, uint8_t report_id, const void* report, uint16_t len) {
+    return tuh_hid_send_ready(address, instance) && tuh_hid_send_report(address, instance, report_id, report, len);
+}
+}
 /* Nintendo Switch 2–family USB bulk bring-up (interface 1), same sequence as
  * Tools/controller_capture/switch2_usb_init.py / HandHeldLegend procon2tool. */
 
@@ -93,16 +110,13 @@ void SwitchProHost::initialize(Gamepad& gamepad, uint8_t address, uint8_t instan
 
     if (is_switch2_usb_family(vid, pid))
     {
-        switch2_bringup_active_ = true;
-        switch2_pkt_idx_ = 0;
-        switch2_ep_out_ = 0;
-        switch2_ep_in_ = 0;
-        switch2_start_config_read();
+        switch2_start_bringup();
     }
     else
     {
         switch2_bringup_active_ = false;
         init_switch_host(gamepad, address, instance);
+        tuh_hid_receive_report(address, instance);
     }
 }
 
@@ -114,7 +128,7 @@ void SwitchProHost::switch2_start_config_read()
             switch2_cfg_buf_.data(),
             static_cast<uint16_t>(switch2_cfg_buf_.size()),
             switch2_cfg_cb,
-            reinterpret_cast<uintptr_t>(this)))
+            switch2_make_cb_token(switch2_dev_addr_, hid_instance_)))
     {
         switch2_finish_bringup();
     }
@@ -189,7 +203,9 @@ bool SwitchProHost::switch2_parse_open_iface1(const uint8_t* desc_cfg, uint16_t 
 
 void SwitchProHost::switch2_cfg_cb(tuh_xfer_s* xfer)
 {
-    auto* self = reinterpret_cast<SwitchProHost*>(xfer->user_data);
+    const uint8_t daddr = xfer->daddr;
+    const uint8_t instance = static_cast<uint8_t>(xfer->user_data >> 8);
+    SwitchProHost* self = switch2_lookup(daddr, instance);
     if (self == nullptr || !self->switch2_bringup_active_)
     {
         return;
@@ -203,6 +219,23 @@ void SwitchProHost::switch2_cfg_cb(tuh_xfer_s* xfer)
     }
 
     uint16_t actual = static_cast<uint16_t>(xfer->actual_len);
+    auto const* cfg = reinterpret_cast<tusb_desc_configuration_t const*>(self->switch2_cfg_buf_.data());
+    const uint16_t total = tu_le16toh(cfg->wTotalLength);
+    if (total > actual && total <= self->switch2_cfg_buf_.size())
+    {
+        if (!tuh_descriptor_get_configuration(
+                self->switch2_dev_addr_,
+                0,
+                self->switch2_cfg_buf_.data(),
+                total,
+                switch2_cfg_cb,
+                switch2_make_cb_token(self->switch2_dev_addr_, self->hid_instance_)))
+        {
+            self->switch2_finish_bringup();
+        }
+        return;
+    }
+
     if (!self->switch2_parse_open_iface1(self->switch2_cfg_buf_.data(), actual))
     {
         self->switch2_finish_bringup();
@@ -215,9 +248,17 @@ void SwitchProHost::switch2_cfg_cb(tuh_xfer_s* xfer)
 
 void SwitchProHost::switch2_out_cb(tuh_xfer_s* xfer)
 {
-    auto* self = reinterpret_cast<SwitchProHost*>(xfer->user_data);
+    const uint8_t daddr = xfer->daddr;
+    const uint8_t instance = static_cast<uint8_t>(xfer->user_data >> 8);
+    SwitchProHost* self = switch2_lookup(daddr, instance);
     if (self == nullptr || !self->switch2_bringup_active_)
     {
+        return;
+    }
+
+    if (xfer->result != XFER_RESULT_SUCCESS)
+    {
+        self->switch2_finish_bringup();
         return;
     }
 
@@ -233,7 +274,9 @@ void SwitchProHost::switch2_out_cb(tuh_xfer_s* xfer)
 
 void SwitchProHost::switch2_in_cb(tuh_xfer_s* xfer)
 {
-    auto* self = reinterpret_cast<SwitchProHost*>(xfer->user_data);
+    const uint8_t daddr = xfer->daddr;
+    const uint8_t instance = static_cast<uint8_t>(xfer->user_data >> 8);
+    SwitchProHost* self = switch2_lookup(daddr, instance);
     if (self == nullptr || !self->switch2_bringup_active_)
     {
         return;
@@ -259,11 +302,11 @@ void SwitchProHost::switch2_submit_out_packet()
     xfer.buflen = pkt.len;
     xfer.buffer = switch2_bulk_out_buf_.data();
     xfer.complete_cb = switch2_out_cb;
-    xfer.user_data = reinterpret_cast<uintptr_t>(this);
+    xfer.user_data = switch2_make_cb_token(switch2_dev_addr_, hid_instance_);
 
     if (!tuh_edpt_xfer(&xfer))
     {
-        switch2_after_packet_round();
+        switch2_next_packet_ms_ = board_api::ms_since_boot() + 12U;
     }
 }
 
@@ -275,11 +318,11 @@ void SwitchProHost::switch2_submit_in_read()
     xfer.buflen = 64;
     xfer.buffer = switch2_bulk_in_buf_.data();
     xfer.complete_cb = switch2_in_cb;
-    xfer.user_data = reinterpret_cast<uintptr_t>(this);
+    xfer.user_data = switch2_make_cb_token(switch2_dev_addr_, hid_instance_);
 
     if (!tuh_edpt_xfer(&xfer))
     {
-        switch2_after_packet_round();
+        switch2_next_packet_ms_ = board_api::ms_since_boot() + 12U;
     }
 }
 
@@ -291,16 +334,156 @@ void SwitchProHost::switch2_after_packet_round()
         switch2_finish_bringup();
         return;
     }
-    switch2_submit_out_packet();
+    switch2_next_packet_ms_ = board_api::ms_since_boot() + 12U;
 }
 
 void SwitchProHost::switch2_finish_bringup()
 {
+    const bool bulk_complete = switch2_pkt_idx_ >= SWITCH2_USB_BULK_PACKET_COUNT;
     switch2_bringup_active_ = false;
-    if (switch2_gamepad_ != nullptr)
+    switch2_next_packet_ms_ = 0;
+
+    if (switch2_gamepad_ == nullptr)
     {
-        init_switch_host(*switch2_gamepad_, switch2_dev_addr_, hid_instance_);
+        return;
     }
+
+    if (bulk_complete)
+    {
+        /* Switch 2–family: bulk bring-up replaces Switch 1 wired 0x80 HID init. */
+        init_state_ = InitState::DONE;
+        send_usb_disable_timeout(switch2_dev_addr_, hid_instance_);
+        switch2_last_bulk_keepalive_ms_ = board_api::ms_since_boot();
+        switch2_send_bulk_keepalive();
+        tuh_hid_receive_report(switch2_dev_addr_, hid_instance_);
+        return;
+    }
+
+    switch2_bringup_pending_retry_ = true;
+}
+
+SwitchProHost::~SwitchProHost()
+{
+    switch2_cancel_bringup();
+}
+
+void SwitchProHost::disconnect_cb(Gamepad& gamepad, uint8_t address, uint8_t instance)
+{
+    (void)gamepad;
+    (void)address;
+    (void)instance;
+    switch2_cancel_bringup();
+}
+
+uintptr_t SwitchProHost::switch2_make_cb_token(uint8_t daddr, uint8_t instance)
+{
+    return (static_cast<uintptr_t>(instance) << 8) | daddr;
+}
+
+SwitchProHost* SwitchProHost::switch2_lookup(uint8_t daddr, uint8_t instance)
+{
+    return HostManager::get_instance().get_switch_pro_host(daddr, instance);
+}
+
+void SwitchProHost::switch2_cancel_bringup()
+{
+    if (switch2_bringup_active_ && switch2_ep_out_ == 0 && switch2_dev_addr_ != 0) {
+        (void)tuh_edpt_abort_xfer(switch2_dev_addr_, 0);
+    }
+    switch2_bringup_active_ = false;
+    switch2_bringup_pending_retry_ = false;
+    switch2_next_packet_ms_ = 0;
+    switch2_pkt_idx_ = 0;
+    switch2_bulk_keepalive_busy_ = false;
+
+    if (switch2_dev_addr_ != 0)
+    {
+        if (switch2_ep_out_ != 0)
+        {
+            (void)tuh_edpt_abort_xfer(switch2_dev_addr_, switch2_ep_out_);
+        }
+        if (switch2_ep_in_ != 0)
+        {
+            (void)tuh_edpt_abort_xfer(switch2_dev_addr_, switch2_ep_in_);
+        }
+    }
+
+    switch2_ep_out_ = 0;
+    switch2_ep_in_ = 0;
+}
+
+void SwitchProHost::switch2_start_bringup()
+{
+    switch2_bringup_active_ = true;
+    switch2_pkt_idx_ = 0;
+    switch2_ep_out_ = 0;
+    switch2_ep_in_ = 0;
+    switch2_next_packet_ms_ = 0;
+    switch2_start_config_read();
+}
+
+void SwitchProHost::switch2_keepalive_cb(tuh_xfer_s* xfer)
+{
+    const uint8_t daddr = xfer->daddr;
+    const uint8_t instance = static_cast<uint8_t>(xfer->user_data >> 8);
+    SwitchProHost* self = switch2_lookup(daddr, instance);
+    if (self != nullptr)
+    {
+        self->switch2_bulk_keepalive_busy_ = false;
+    }
+    (void)daddr;
+    (void)instance;
+}
+
+void SwitchProHost::switch2_send_bulk_keepalive()
+{
+    if (switch2_ep_out_ == 0 || switch2_bulk_keepalive_busy_)
+    {
+        return;
+    }
+
+    static const uint8_t kKeepalive[] = {0x03, 0x91, 0x00, 0x01, 0x00, 0x00, 0x00};
+    if (sizeof(kKeepalive) > switch2_bulk_out_buf_.size())
+    {
+        return;
+    }
+
+    std::memcpy(switch2_bulk_out_buf_.data(), kKeepalive, sizeof(kKeepalive));
+
+    tuh_xfer_t xfer{};
+    xfer.daddr = switch2_dev_addr_;
+    xfer.ep_addr = switch2_ep_out_;
+    xfer.buflen = static_cast<uint16_t>(sizeof(kKeepalive));
+    xfer.buffer = switch2_bulk_out_buf_.data();
+    xfer.complete_cb = switch2_keepalive_cb;
+    xfer.user_data = switch2_make_cb_token(switch2_dev_addr_, hid_instance_);
+
+    switch2_bulk_keepalive_busy_ = true;
+    if (!tuh_edpt_xfer(&xfer))
+    {
+        switch2_bulk_keepalive_busy_ = false;
+    }
+}
+
+void SwitchProHost::switch2_poll_bringup()
+{
+    if (!switch2_bringup_active_ || switch2_next_packet_ms_ == 0)
+    {
+        return;
+    }
+    if (board_api::ms_since_boot() < switch2_next_packet_ms_)
+    {
+        return;
+    }
+    switch2_next_packet_ms_ = 0;
+    switch2_submit_out_packet();
+}
+
+void SwitchProHost::send_usb_disable_timeout(uint8_t address, uint8_t instance)
+{
+    uint8_t usb_out[63] = {0};
+    usb_out[0] = SwitchPro::CMD::USB_SUB_DISABLE_TIMEOUT;
+    (void)try_hid_out_id(address, instance, SwitchPro::REPORT_ID_USB_OUT, usb_out, sizeof(usb_out));
 }
 
 uint8_t SwitchProHost::get_output_sequence_counter()
@@ -339,8 +522,10 @@ void SwitchProHost::init_switch_host(Gamepad& gamepad, uint8_t address, uint8_t 
         case InitState::HANDSHAKE:
             report_size = 2;
 
-            out_report_.command = SwitchPro::CMD::HID;
-            out_report_.sequence_counter = SwitchPro::CMD::HANDSHAKE;
+            // wiredopposite USB handshake: 80 02. Shared HID/HANDSHAKE
+            // constants describe the legacy device path, not host USB traffic.
+            out_report_.command = SwitchPro::CMD::USB_OUT;
+            out_report_.sequence_counter = SwitchPro::CMD::USB_SUB_HANDSHAKE;
 
             if (tuh_hid_send_report(address, instance, 0, &out_report_, report_size))
             {
@@ -350,8 +535,8 @@ void SwitchProHost::init_switch_host(Gamepad& gamepad, uint8_t address, uint8_t 
         case InitState::TIMEOUT:
             report_size = 2;
 
-            out_report_.command = SwitchPro::CMD::HID;
-            out_report_.sequence_counter = SwitchPro::CMD::DISABLE_TIMEOUT;
+            out_report_.command = SwitchPro::CMD::USB_OUT;
+            out_report_.sequence_counter = SwitchPro::CMD::USB_SUB_DISABLE_TIMEOUT;
 
             if (tuh_hid_send_report(address, instance, 0, &out_report_, report_size))
             {
@@ -361,7 +546,7 @@ void SwitchProHost::init_switch_host(Gamepad& gamepad, uint8_t address, uint8_t 
         case InitState::LED:
             report_size = 12;
 
-            out_report_.command = SwitchPro::CMD::AND_RUMBLE_LEGACY;
+            out_report_.command = SwitchPro::CMD::AND_RUMBLE;
             out_report_.sub_command = SwitchPro::CMD::LED;
             out_report_.sub_command_args[0] = idx_ + 1;
 
@@ -373,7 +558,7 @@ void SwitchProHost::init_switch_host(Gamepad& gamepad, uint8_t address, uint8_t 
         case InitState::LED_HOME:
             report_size = 14;
 
-            out_report_.command = SwitchPro::CMD::AND_RUMBLE_LEGACY;
+            out_report_.command = SwitchPro::CMD::AND_RUMBLE;
             out_report_.sub_command = SwitchPro::CMD::LED_HOME;
             out_report_.sub_command_args[0] = (0 /* Number of cycles */ << 4) | (true ? 0xF : 0);
             out_report_.sub_command_args[1] = (0xF /* LED start intensity */ << 4) | 0x0 /* Number of full cycles */;
@@ -387,7 +572,7 @@ void SwitchProHost::init_switch_host(Gamepad& gamepad, uint8_t address, uint8_t 
         case InitState::FULL_REPORT:
             report_size = 12;
 
-            out_report_.command = SwitchPro::CMD::AND_RUMBLE_LEGACY;
+            out_report_.command = SwitchPro::CMD::AND_RUMBLE;
             out_report_.sub_command = SwitchPro::CMD::MODE;
             out_report_.sub_command_args[0] = SwitchPro::CMD::FULL_REPORT_MODE;
 
@@ -399,7 +584,7 @@ void SwitchProHost::init_switch_host(Gamepad& gamepad, uint8_t address, uint8_t 
         case InitState::IMU:
             report_size = 12;
 
-            out_report_.command = SwitchPro::CMD::AND_RUMBLE_LEGACY;
+            out_report_.command = SwitchPro::CMD::AND_RUMBLE;
             out_report_.sub_command = SwitchPro::CMD::GYRO;
             out_report_.sub_command_args[0] = 1 ? 1 : 0;
 
@@ -446,6 +631,7 @@ void SwitchProHost::process_report(Gamepad& gamepad, uint8_t address, uint8_t in
     if (init_state_ != InitState::DONE)
     {
         init_switch_host(gamepad, address, instance);
+        tuh_hid_receive_report(address, instance);
         return;
     }
 
@@ -479,9 +665,9 @@ void SwitchProHost::process_report(Gamepad& gamepad, uint8_t address, uint8_t in
     if (in_report->buttons[0] & SwitchPro::Buttons0::R)
         gp_in.buttons |= gamepad.MAP_BUTTON_RB;
     if (in_report->buttons[1] & SwitchPro::Buttons1::L3)
-        gp_in.buttons |= gamepad.MAP_BUTTON_L3;
-    if (in_report->buttons[1] & SwitchPro::Buttons1::R3)
         gp_in.buttons |= gamepad.MAP_BUTTON_R3;
+    if (in_report->buttons[1] & SwitchPro::Buttons1::R3)
+        gp_in.buttons |= gamepad.MAP_BUTTON_L3;
     if (in_report->buttons[1] & SwitchPro::Buttons1::MINUS)
         gp_in.buttons |= gamepad.MAP_BUTTON_BACK;
     if (in_report->buttons[1] & SwitchPro::Buttons1::PLUS)
@@ -492,13 +678,13 @@ void SwitchProHost::process_report(Gamepad& gamepad, uint8_t address, uint8_t in
         gp_in.buttons |= gamepad.MAP_BUTTON_MISC;
 
     if (in_report->buttons[2] & SwitchPro::Buttons2::DPAD_UP)
-        gp_in.dpad |= gamepad.MAP_DPAD_UP;
-    if (in_report->buttons[2] & SwitchPro::Buttons2::DPAD_DOWN)
         gp_in.dpad |= gamepad.MAP_DPAD_DOWN;
+    if (in_report->buttons[2] & SwitchPro::Buttons2::DPAD_DOWN)
+        gp_in.dpad |= gamepad.MAP_DPAD_UP;
     if (in_report->buttons[2] & SwitchPro::Buttons2::DPAD_LEFT)
-        gp_in.dpad |= gamepad.MAP_DPAD_LEFT;
-    if (in_report->buttons[2] & SwitchPro::Buttons2::DPAD_RIGHT)
         gp_in.dpad |= gamepad.MAP_DPAD_RIGHT;
+    if (in_report->buttons[2] & SwitchPro::Buttons2::DPAD_RIGHT)
+        gp_in.dpad |= gamepad.MAP_DPAD_LEFT;
 
     gp_in.trigger_l = in_report->buttons[2] & SwitchPro::Buttons2::ZL ? Range::MAX<uint8_t> : Range::MIN<uint8_t>;
     gp_in.trigger_r = in_report->buttons[0] & SwitchPro::Buttons0::ZR ? Range::MAX<uint8_t> : Range::MIN<uint8_t>;
@@ -522,9 +708,25 @@ void SwitchProHost::process_report(Gamepad& gamepad, uint8_t address, uint8_t in
 
 bool SwitchProHost::send_feedback(Gamepad& gamepad, uint8_t address, uint8_t instance)
 {
-    if (switch2_bringup_active_)
+    uint16_t vid=0, pid=0;
+    tuh_vid_pid_get(address, &vid, &pid);
+    if (is_switch2_usb_family(vid, pid))
     {
-        return false;
+        if (switch2_bringup_active_) {
+            switch2_poll_bringup();
+            return false;
+        }
+        if (switch2_bringup_pending_retry_) {
+            switch2_bringup_pending_retry_=false;
+            switch2_start_bringup();
+            return false;
+        }
+        const uint32_t now=board_api::ms_since_boot();
+        if (now-switch2_last_bulk_keepalive_ms_ >= 2000u) {
+            switch2_last_bulk_keepalive_ms_=now;
+            switch2_send_bulk_keepalive();
+        }
+        if (!gamepad.new_pad_out() && !gamepad.has_rumble()) return true;
     }
 
     if (init_state_ != InitState::DONE)

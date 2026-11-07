@@ -3,6 +3,8 @@
 #if (TUSB_OPT_HOST_ENABLED && CFG_TUH_XINPUT)
 
 #include <cstring>
+#include "Board/board_api.h"
+#include "USBHost/HostDriver/VictrixGambit/VictrixGambit.h"
 #include <chrono>
 
 #include "USBHost/HostDriver/XInput/tuh_xinput/tuh_xinput.h"
@@ -138,10 +140,15 @@ bool send_ctrl_xfer(uint8_t dev_addr, const tusb_control_request_t* request, uin
     return tuh_control_xfer(&transfer);
 }
 
+static void prime_port_for_pairing(uint8_t, uint8_t);
+static bool send_gip_packet(Interface*, uint8_t, uint8_t, const uint8_t*, uint16_t, bool);
+
 static void xboxone_init(Interface *interface, uint8_t dev_addr, uint8_t instance)
 {
     uint16_t PID, VID;
     tuh_vid_pid_get(dev_addr, &VID, &PID);
+
+    if (VictrixGambitHost::is_known_id(VID, PID)) return;
 
     send_report(dev_addr, instance, XboxOne::POWER_ON, sizeof(XboxOne::POWER_ON));
     wait_for_tx_complete(dev_addr, interface->ep_out);
@@ -277,6 +284,10 @@ static bool set_config(uint8_t dev_addr, uint8_t itf_num)
         mount_cb(dev_addr, instance, interface);
     }
 
+    if (interface->dev_type == DevType::XBOX360W) {
+        receive_report(dev_addr, instance);
+        prime_port_for_pairing(dev_addr, instance);
+    }
     usbh_driver_set_config_complete(dev_addr, interface->itf_num);
     return true;
 }
@@ -284,10 +295,24 @@ static bool set_config(uint8_t dev_addr, uint8_t itf_num)
 static bool xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes)
 {
     Interface* interface = get_itf_by_ep(dev_addr, ep_addr);
+    TU_VERIFY(interface != nullptr);
     uint8_t instance = get_instance_by_itf_num(dev_addr, interface->itf_num);
-    TU_VERIFY(interface != nullptr && instance != INVALID_IDX);
+    TU_VERIFY(instance != INVALID_IDX);
     
     const uint8_t dir = tu_edpt_dir(ep_addr);
+    uint16_t vid=0, pid=0;
+    tuh_vid_pid_get(dev_addr, &vid, &pid);
+    if (VictrixGambitHost::is_known_id(vid,pid)) {
+        const bool ok=result==XFER_RESULT_SUCCESS;
+        if (dir==TUSB_DIR_IN) {
+            VictrixGambitHost::on_in_xfer_result(dev_addr,instance,ok,static_cast<uint16_t>(xferred_bytes));
+            if (ok) report_received_cb(dev_addr,instance,interface->ep_in_buffer.data(),static_cast<uint16_t>(xferred_bytes));
+        } else if (out_xfer_complete_cb) {
+            out_xfer_complete_cb(dev_addr,instance,ok,interface->ep_out_buffer.data(),static_cast<uint16_t>(xferred_bytes));
+        }
+        return true;
+    }
+
 
     if (result != XFER_RESULT_SUCCESS)
     {
@@ -317,15 +342,16 @@ static bool xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uin
             case DevType::XBOX360W:
                 if (in_buffer[0] & 0x08)
                 {
-                    if (in_buffer[1] != 0x00 && !interface->connected)
+                    /* Byte1 bit7 = controller present (0x80). Do not treat headset-only 0x40 as paired. */
+                    if ((in_buffer[1] & 0x80) && !interface->connected)
                     {
                         interface->connected = true;
 
                         TU_LOG1("Xbox 360 wireless controller connected\n");
 
-                        //I think some 3rd party adapters need this:
-                        std_sleep_ms(1000);
                         send_report(dev_addr, instance, Xbox360W::RUMBLE_ENABLE, sizeof(Xbox360W::RUMBLE_ENABLE));
+                        wait_for_tx_complete(dev_addr, interface->ep_out);
+                        set_led(dev_addr, instance, wireless_led_quadrant(dev_addr, instance), true);
 
                         if (xbox360w_connect_cb)
                         {
@@ -345,7 +371,9 @@ static bool xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uin
                         }
                     }
                 }
-                if ((in_buffer[1] & 1 && in_buffer[5] == 0x13) || (in_buffer[1] & 2))
+                if (((in_buffer[1] & 1) && xferred_bytes >= 18 &&
+                     (in_buffer[5] == 0x13 || in_buffer[5] == 0x14)) ||
+                    (in_buffer[1] & 2))
                 {
                     new_pad_data = true;
                 }
@@ -561,6 +589,331 @@ bool set_rumble(uint8_t dev_addr, uint8_t instance, uint8_t rumble_l, uint8_t ru
         wait_for_tx_complete(dev_addr, interface->ep_out);
     }
     return true;
+}
+
+
+namespace {
+
+set_interface_complete_cb_t g_set_interface_cb = nullptr;
+uint8_t g_set_interface_addr = 0;
+
+struct InterfaceAltResult { bool done{false}; bool success{false}; };
+void interface_alt_complete(tuh_xfer_t* xfer) {
+    auto* result=reinterpret_cast<InterfaceAltResult*>(xfer->user_data);
+    result->success=xfer->result==XFER_RESULT_SUCCESS;
+    result->done=true;
+}
+
+void set_interface_complete_trampoline(tuh_xfer_t* xfer)
+{
+    const set_interface_complete_cb_t cb = g_set_interface_cb;
+    g_set_interface_cb = nullptr;
+    g_set_interface_addr = 0;
+    if (!cb || !xfer)
+    {
+        return;
+    }
+    cb(xfer->daddr, xfer->result == XFER_RESULT_SUCCESS, xfer->result, xfer->user_data);
+}
+
+} // namespace
+
+bool get_interface_alt(uint8_t daddr, uint8_t itf_num, uint8_t* alt_out)
+{
+    if (!alt_out) return false;
+    uint8_t alt=0xff;
+    const tusb_control_request_t request={
+        .bmRequestType=0x81, .bRequest=TUSB_REQ_GET_INTERFACE,
+        .wValue=0, .wIndex=tu_htole16(itf_num), .wLength=tu_htole16(1)
+    };
+    InterfaceAltResult result;
+    tuh_xfer_t xfer={.daddr=daddr, .ep_addr=0, .setup=&request, .buffer=&alt,
+        .complete_cb=interface_alt_complete, .user_data=reinterpret_cast<uintptr_t>(&result)};
+    if (!tuh_control_xfer(&xfer)) return false;
+    auto started=std::chrono::steady_clock::now();
+    while (!result.done && std::chrono::steady_clock::now()-started < std::chrono::milliseconds(150)) {
+#if defined(CONFIG_EN_USB_HOST)
+        pio_usb_host_frame();
+#endif
+        tuh_task();
+    }
+    if (!result.done) (void)tuh_edpt_abort_xfer(daddr,0);
+    if (!result.done || !result.success) return false;
+    *alt_out=alt;
+    return true;
+}
+
+static bool send_gip_packet(Interface* interface, uint8_t dev_addr, uint8_t instance,
+    const uint8_t* packet, uint16_t len, bool assign_seq = true)
+{
+    uint8_t buf[ENDPOINT_SIZE];
+    if (len > sizeof(buf))
+    {
+        return false;
+    }
+    std::memcpy(buf, packet, len);
+    if (assign_seq && len >= 3)
+    {
+        uint8_t seq;
+        do
+        {
+            seq = interface->gip_out_seq++;
+        } while (interface->gip_seq_skip_zero && seq == 0);
+        buf[2] = seq;
+    }
+    return send_report(dev_addr, instance, buf, len);
+}
+
+bool is_connected(uint8_t dev_addr, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(dev_addr, instance);
+    return interface != nullptr && interface->connected;
+}
+
+uint8_t wireless_led_quadrant(uint8_t dev_addr, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(dev_addr, instance);
+    if (interface == nullptr || interface->dev_type != DevType::XBOX360W)
+    {
+        return static_cast<uint8_t>(instance + 1);
+    }
+    /* Receiver USB layout: controller ports on interface numbers 0,2,4,6. */
+    return static_cast<uint8_t>((interface->itf_num / 2) + 1);
+}
+
+void service_wireless_ports(uint8_t dev_addr)
+{
+    Device* device = get_device_by_addr(dev_addr);
+    if (device == nullptr)
+    {
+        return;
+    }
+    for (uint8_t i = 0; i < device->interfaces.size(); ++i)
+    {
+        if (device->interfaces[i].dev_type == DevType::XBOX360W &&
+            device->interfaces[i].itf_num != INVALID_IDX)
+        {
+            prime_port_for_pairing(dev_addr, i);
+        }
+    }
+}
+
+static void prime_port_for_pairing(uint8_t dev_addr, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(dev_addr, instance);
+    if (interface == nullptr || interface->dev_type != DevType::XBOX360W ||
+        interface->connected || interface->itf_num == INVALID_IDX)
+    {
+        return;
+    }
+    if (usbh_edpt_busy(dev_addr, interface->ep_out))
+    {
+        return;
+    }
+    send_report(dev_addr, instance, Xbox360W::RUMBLE_ENABLE, sizeof(Xbox360W::RUMBLE_ENABLE));
+    set_led(dev_addr, instance, wireless_led_quadrant(dev_addr, instance), false);
+}
+
+bool out_endpoint_ready(uint8_t address, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr || interface->ep_out == 0xFF)
+    {
+        return false;
+    }
+    return !usbh_edpt_busy(address, interface->ep_out);
+}
+
+void prepare_gip_session(uint8_t address, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr)
+    {
+        return;
+    }
+    interface->gip_power_sent = false;
+    interface->gip_last_in_ok_ms = 0;
+    interface->gip_last_in_arm_ms = 0;
+    interface->gip_out_seq = 0;
+    interface->gip_seq_skip_zero = false;
+
+    uint16_t vid = 0;
+    uint16_t pid = 0;
+    tuh_vid_pid_get(address, &vid, &pid);
+    if (VictrixGambitHost::is_known_id(vid, pid))
+    {
+        /* xone: host-generated GIP sequences are nonzero. */
+        interface->gip_seq_skip_zero = true;
+        interface->gip_out_seq = 1;
+    }
+}
+
+void mark_gip_power_sent(uint8_t address, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr)
+    {
+        return;
+    }
+    interface->gip_power_sent = true;
+}
+
+uint8_t current_gip_seq(uint8_t address, uint8_t instance)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr)
+    {
+        return 0;
+    }
+    return interface->gip_out_seq;
+}
+
+void get_endpoint_info(uint8_t address, uint8_t instance, uint8_t* itf_num, uint8_t* ep_in,
+                       uint8_t* ep_out, uint16_t* ep_in_size, uint16_t* ep_out_size)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr)
+    {
+        return;
+    }
+    if (itf_num)
+    {
+        *itf_num = interface->itf_num;
+    }
+    if (ep_in)
+    {
+        *ep_in = interface->ep_in;
+    }
+    if (ep_out)
+    {
+        *ep_out = interface->ep_out;
+    }
+    if (ep_in_size)
+    {
+        *ep_in_size = interface->ep_in_size;
+    }
+    if (ep_out_size)
+    {
+        *ep_out_size = interface->ep_out_size;
+    }
+}
+
+bool send_gip_out(uint8_t address, uint8_t instance, const uint8_t* packet, uint16_t len,
+                  bool assign_seq)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr || packet == nullptr || len == 0)
+    {
+        return false;
+    }
+    return send_gip_packet(interface, address, instance, packet, len, assign_seq);
+}
+
+bool arm_gip_in(uint8_t address, uint8_t instance, const char** reason_out)
+{
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr || interface->ep_in == 0xFF)
+    {
+        if (reason_out)
+        {
+            *reason_out = "no_interface";
+        }
+        return false;
+    }
+
+    if (usbh_edpt_busy(address, interface->ep_in))
+    {
+        if (reason_out)
+        {
+            *reason_out = "ALREADY_ARMED";
+        }
+        return true;
+    }
+
+    if (!receive_report(address, instance))
+    {
+        if (reason_out)
+        {
+            *reason_out = "SUBMIT_FAILED";
+        }
+        return false;
+    }
+
+    if (reason_out)
+    {
+        *reason_out = "SUCCESS";
+    }
+    return true;
+}
+
+bool send_gip_ack_if_requested(uint8_t address, uint8_t instance, const uint8_t* packet,
+                               uint16_t len, uint16_t bytes_received, uint16_t remaining)
+{
+    if (!packet || len < 4)
+    {
+        return false;
+    }
+    if ((packet[1] & XboxOne::GIP_OPT_ACK) == 0)
+    {
+        return false;
+    }
+
+    Interface* interface = get_itf_by_instance(address, instance);
+    if (interface == nullptr)
+    {
+        return false;
+    }
+
+    /* xone gip_pkt_acknowledge: unknown, command, options, le16 length, pad[2], le16 remaining */
+    uint8_t ack[13] = {
+        XboxOne::GIP_CMD_ACK,
+        XboxOne::GIP_OPT_INTERNAL,
+        packet[2], /* sequence of the packet being acknowledged */
+        XboxOne::GIP_PL_LEN(9),
+        0x00,
+        packet[0],
+        XboxOne::GIP_OPT_INTERNAL,
+        static_cast<uint8_t>(bytes_received & 0xFFu),
+        static_cast<uint8_t>((bytes_received >> 8) & 0xFFu),
+        0x00,
+        0x00,
+        static_cast<uint8_t>(remaining & 0xFFu),
+        static_cast<uint8_t>((remaining >> 8) & 0xFFu),
+    };
+
+    return send_gip_packet(interface, address, instance, ack, sizeof(ack), false);
+}
+
+bool disable_gip_audio_interface(uint8_t daddr, uint8_t itf_num, uint8_t itf_alt,
+                                 set_interface_complete_cb_t complete_cb, uintptr_t user_data)
+{
+    if (!complete_cb)
+    {
+        return false;
+    }
+    if (g_set_interface_cb != nullptr)
+    {
+        return false;
+    }
+    g_set_interface_cb = complete_cb;
+    g_set_interface_addr = daddr;
+    if (!tuh_interface_set(daddr, itf_num, itf_alt, set_interface_complete_trampoline, user_data))
+    {
+        g_set_interface_cb = nullptr;
+        g_set_interface_addr = 0;
+        return false;
+    }
+    return true;
+}
+
+
+void cancel_gip_control(uint8_t daddr)
+{
+    if (g_set_interface_addr == daddr) {
+        (void)tuh_edpt_abort_xfer(daddr, 0);
+        g_set_interface_cb = nullptr;
+        g_set_interface_addr = 0;
+    }
 }
 
 void xbox360_chatpad_init(uint8_t address, uint8_t instance)

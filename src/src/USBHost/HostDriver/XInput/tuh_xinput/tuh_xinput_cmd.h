@@ -22,6 +22,11 @@ namespace tuh_xinput
         static constexpr uint8_t GIP_SEQ0           = 0x00;
         static constexpr uint8_t GIP_OPT_ACK        = 0x10;
         static constexpr uint8_t GIP_OPT_INTERNAL   = 0x20;
+        static constexpr uint8_t GIP_OPT_CHUNK_START = 0x40;
+        static constexpr uint8_t GIP_OPT_CHUNK       = 0x80;
+        static constexpr uint8_t IDENTIFY_REQ[] = {
+            GIP_CMD_IDENTIFY, GIP_OPT_INTERNAL, GIP_SEQ0, 0x00
+        };
 
         constexpr uint8_t GIP_PL_LEN(uint8_t N) { return N; }
 

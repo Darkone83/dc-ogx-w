@@ -57,7 +57,7 @@ list(APPEND PICO_BOARD_HEADER_DIRS "${CMAKE_CURRENT_LIST_DIR}/boards")
 list(REMOVE_DUPLICATES PICO_BOARD_HEADER_DIRS)
 
 include(pico_sdk_import.cmake)
-project(dc-ogx-w VERSION 0.2.4 LANGUAGES C CXX ASM)
+project(dc-ogx-w VERSION 0.2.5 LANGUAGES C CXX ASM)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -137,7 +137,19 @@ if(DC_OGX_USB_HOST_ENABLED AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
         src/USBHost/HostDriver/SwitchPro/SwitchPro.cpp
         src/USBHost/HostDriver/PS5/PS5.cpp
         src/USBHost/HostDriver/PS4/PS4.cpp
+        src/USBHost/HostDriver/PS3/PS3.cpp
         src/USBHost/HostDriver/XInput/XboxOne.cpp
+        src/USBHost/HostDriver/XInput/Xbox360.cpp
+        src/USBHost/HostDriver/XInput/Xbox360W.cpp
+        src/USBHost/HostDriver/XInput/XboxOG.cpp
+        src/USBHost/HostDriver/SwitchPro/Switch2ProHost.cpp
+        src/USBHost/HostDriver/DInput/DInput.cpp
+        src/USBHost/HostDriver/HIDGeneric/HIDGeneric.cpp
+        src/USBHost/HostDriver/SwitchWired/SwitchWired.cpp
+        src/USBHost/HostDriver/PSClassic/PSClassic.cpp
+        src/USBHost/HostDriver/N64/N64.cpp
+        src/USBHost/HostDriver/GameSirG7Pro/GameSirG7Pro.cpp
+        src/USBHost/HostDriver/VictrixGambit/VictrixGambit.cpp
         src/USBHost/HostDriver/XInput/tuh_xinput/tuh_xinput.cpp
     )
     file(GLOB_RECURSE _dc_usb_stack_sources CONFIGURE_DEPENDS

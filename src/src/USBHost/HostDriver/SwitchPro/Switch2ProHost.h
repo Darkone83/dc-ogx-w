@@ -18,6 +18,9 @@ public:
 
     void process_report(Gamepad& gamepad, uint8_t address, uint8_t instance, const uint8_t* report, uint16_t len) override;
 
+private:
+    uint8_t prev_imu_[12]{};
+
 #ifdef OGXM_SWITCH2_HID_RAW_LOG
 private:
     static constexpr std::uint16_t kSwitch2RawLogCap = 64;

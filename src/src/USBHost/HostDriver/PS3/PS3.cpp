@@ -24,11 +24,18 @@ namespace {
 
 struct SyncXferCtx {
     bool done{false};
+    bool success{false};
 };
 
 void sync_xfer_cb(tuh_xfer_s* xfer) {
     auto* ctx = reinterpret_cast<SyncXferCtx*>(xfer->user_data);
+    ctx->success = xfer->result == XFER_RESULT_SUCCESS;
     ctx->done = true;
+}
+
+void async_xfer_cb(tuh_xfer_s*) {
+    // TinyUSB treats a null completion callback as a blocking transfer.
+    // A real callback keeps periodic output from waiting without servicing PIO.
 }
 
 #if defined(CONFIG_EN_USB_HOST)
@@ -90,8 +97,7 @@ bool PS3Host::program_ds3_bt_host(uint8_t address) {
     bt_pair_buf_[1] = 0;
     std::memcpy(bt_pair_buf_.data() + 2, addr, 6);
     /* Sync transfer: PIO USB needs pio_usb_host_frame() while control completes. */
-    (void)send_control_xfer_wait(address, &BT_MAC_FEATURE_REQUEST, bt_pair_buf_.data(), 150u);
-    return true;
+    return send_control_xfer_wait(address, &BT_MAC_FEATURE_REQUEST, bt_pair_buf_.data(), 150u);
 }
 
 void PS3Host::try_deferred_ds3_bt_pair(uint8_t address) {
@@ -126,7 +132,7 @@ bool PS3Host::send_control_xfer(uint8_t dev_addr, const tusb_control_request_t* 
         .ep_addr = 0x00,
         .setup = request, 
         .buffer = buffer,
-        .complete_cb = complete_cb, 
+        .complete_cb = complete_cb ? complete_cb : async_xfer_cb,
         .user_data = user_data
     };
     return tuh_control_xfer(&transfer);
@@ -143,7 +149,12 @@ bool PS3Host::send_control_xfer_wait(uint8_t dev_addr, const tusb_control_reques
         service_usb_host();
         sleep_ms(1);
     }
-    return ctx.done;
+    if (!ctx.done) {
+        // EP0 must no longer reference this stack context or the caller's
+        // setup buffer when a stalled/unplugged controller times out.
+        (void)tuh_edpt_abort_xfer(dev_addr, 0x00);
+    }
+    return ctx.done && ctx.success;
 }
 
 bool PS3Host::send_control_output_sync(uint8_t address, PS3::OutReport* report)
@@ -190,6 +201,10 @@ void PS3Host::initialize(Gamepad& gamepad, uint8_t address, uint8_t instance, co
 
 void PS3Host::process_report(Gamepad& gamepad, uint8_t address, uint8_t instance, const uint8_t* report, uint16_t len)
 {
+    if (report == nullptr || len < sizeof(PS3::InReport) || report[0] != 0x01) {
+        tuh_hid_receive_report(address, instance);
+        return;
+    }
 #if defined(CONFIG_EN_BLUETOOTH)
     try_deferred_ds3_bt_pair(address);
 #endif
@@ -254,12 +269,13 @@ bool PS3Host::send_feedback(Gamepad& gamepad, uint8_t address, uint8_t instance)
     }
 
     const uint32_t current_ms = time_us_32() / 1000;
+    const bool new_output = gamepad.new_pad_out();
     Gamepad::PadOut gp_out = gamepad.get_pad_out();
     const bool has_rumble = (gp_out.rumble_l != 0 || gp_out.rumble_r != 0);
     const bool keepalive_due =
         KEEPALIVE_MS != 0u && (current_ms - last_keepalive_ms_ >= KEEPALIVE_MS);
 
-    if (!has_rumble && !gamepad.new_pad_out() && !keepalive_due) {
+    if (!has_rumble && !new_output && !keepalive_due) {
         return true;
     }
 
