@@ -26,8 +26,8 @@
 
 | Board | CMake preset | Network hardware | Controller sources |
 |---|---|---|---|
-| Pico W-2023 clone | `pico-w-2023` | Onboard ESP8285, UART0 GP0/GP1, existing legacy AT firmware | Wi-Fi WebUI, desktop remote and PIO-USB host (hardware test pending); no Bluetooth |
-| Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers and PIO-USB host (hardware test pending) |
+| Pico W-2023 clone | `pico-w-2023` | Onboard ESP8285, UART0 GP0/GP1, existing legacy AT firmware | Wi-Fi WebUI, desktop remote and PIO-USB host; no Bluetooth |
+| Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers and PIO-USB host |
 
 Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for PIO-USB **host input**. Host input is translated controller data, not electrical USB passthrough.
 
