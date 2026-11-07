@@ -6,7 +6,7 @@
 
 **An RP2040-based controller adapter for the original Xbox and compatible USB output modes.** DC-OGX-W combines a self-hosted WebUI, Wi-Fi remote input, controller profiles, an optional 0.91-inch OLED, and an RGB status LED. The project builds on OGX-Mini and is maintained by **Darkone83 / Darkone Customs**.
 
-**Firmware source version:** `0.2.4` in this repository snapshot. **Stage:** active development; wired PIO-USB host support is implemented but awaits physical validation. Check the board identity and firmware version of bundled images before flashing.
+**Firmware source version:** `0.2.4` in this repository snapshot. Check the board identity and firmware version of bundled images before flashing.
 
 ## Repository layout
 
@@ -29,7 +29,7 @@
 | Pico W-2023 clone | `pico-w-2023` | Onboard ESP8285, UART0 GP0/GP1, existing legacy AT firmware | Wi-Fi WebUI, desktop remote and PIO-USB host (hardware test pending); no Bluetooth |
 | Official Raspberry Pi Pico W | `pico-w` | CYW43439 Wi-Fi/Bluetooth | WebUI, desktop remote, supported Bluetooth controllers and PIO-USB host (hardware test pending) |
 
-Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for PIO-USB **host input** (enabled in current builds; awaiting hardware validation). Host input is translated controller data, not electrical USB passthrough.
+Both use the RP2040's native USB connector for USB **device output**. Other accessory pins: **GP8** RGB LED, **GP14 SDA / GP15 SCL** I²C1 OLED, and **GP9 D+ / GP10 D−** for PIO-USB **host input**. Host input is translated controller data, not electrical USB passthrough.
 
 ## Build firmware
 
