@@ -54,13 +54,18 @@ bool try_lock_network() {
 
 enum class Source : uint8_t { Local, Remote, Neutral };
 enum class Mode : unsigned { Physical, Wifi, Configure };
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-constexpr bool BLUETOOTH_SUPPORTED = false;
-constexpr Mode BOOT_MODE = Mode::Wifi;
-#else
+#if defined(CONFIG_EN_BLUETOOTH)
 constexpr bool BLUETOOTH_SUPPORTED = true;
-constexpr Mode BOOT_MODE = Mode::Physical;
+#else
+constexpr bool BLUETOOTH_SUPPORTED = false;
 #endif
+#if defined(CONFIG_EN_USB_HOST) || defined(CONFIG_EN_BLUETOOTH)
+constexpr bool PHYSICAL_SUPPORTED = true;
+#else
+constexpr bool PHYSICAL_SUPPORTED = false;
+#endif
+// USB and Bluetooth are physical input sources on the same controller runtime.
+constexpr Mode BOOT_MODE = PHYSICAL_SUPPORTED ? Mode::Physical : Mode::Wifi;
 std::atomic<Mode> requested_mode{BOOT_MODE}, applied_mode{BOOT_MODE}, radio_mode{BOOT_MODE};
 std::atomic<bool> bluetooth_connected{false};
 std::atomic<uint32_t> bluetooth_generation{0};
@@ -138,9 +143,9 @@ DeviceDriverType output_driver{DeviceDriverType::NONE};
 bool initialized{};
 uint8_t core_applied_profile_id{1};
 
-// Profile application is a two-core handshake. Core0 stops physical producer
-// polling BEFORE publishing READY. The radio run loop applies the physical
-// profile between Bluetooth callbacks; only then can Core0 resume producers.
+// Only Bluetooth report production pauses during a profile handoff. The radio
+// acknowledges between its serialized callbacks; Core0 then commits both
+// Gamepad configurations between its normal USB service visits.
 enum ApplyStage : unsigned { Idle = 0, Ready, Applying, RadioDone, CoreDone };
 std::atomic<unsigned> apply_stage{Idle};
 UserProfile profile_to_apply;
@@ -152,9 +157,8 @@ std::atomic<bool> maintenance{false};
 std::atomic<bool> clear_owner_requested{false};
 std::atomic<uint32_t> pending_release_token{0};
 
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-// Core0 command consumer. The network core supplies persistent buffers; the
-// radio never changes them before completion. Keep the slot state atomic but
+// Radio service consumes requests outside transport callbacks. The caller
+// keeps borrowed buffers stable until completion. Keep the slot state atomic but
 // all other fields plain: they are published/read through release/acquire.
 struct CoreRequest {
     std::atomic<unsigned> state{0}; // 0 free, 1 queued, 2 executing, 3 done
@@ -172,7 +176,6 @@ struct CoreRequest {
 };
 CoreRequest core_requests[CORE_REQUEST_SLOTS];
 unsigned core_request_rr{};
-#endif
 
 bool remote_selected{};
 bool owner_selected{};
@@ -207,13 +210,14 @@ bool mode_pending() {
 void write_mode(JsonWriter& writer) {
     const Mode requested = requested_mode.load(std::memory_order_acquire);
     writer.append("\"mode\":\"%s\",\"requested_mode\":\"%s\",\"mode_pending\":%s,"
-                  "\"bluetooth_supported\":%s,\"bluetooth_connected\":%s,\"bluetooth_allowed\":%s,"
+                  "\"physical_supported\":%s,\"bluetooth_supported\":%s,\"bluetooth_connected\":%s,\"bluetooth_allowed\":%s,"
                   "\"usb_suppressed\":%s",
                   mode_name(applied_mode.load(std::memory_order_acquire)), mode_name(requested),
-                  mode_pending() ? "true" : "false", BLUETOOTH_SUPPORTED ? "true" : "false",
+                  mode_pending() ? "true" : "false", PHYSICAL_SUPPORTED ? "true" : "false",
+                  BLUETOOTH_SUPPORTED ? "true" : "false",
                   bluetooth_connected.load(std::memory_order_acquire) ? "true" : "false",
                   BLUETOOTH_SUPPORTED && requested != Mode::Wifi ? "true" : "false",
-                  requested == Mode::Configure || mode_pending() || maintenance.load() ? "true" : "false");
+                  requested == Mode::Configure || mode_pending() || profile_apply_pending() || maintenance.load() ? "true" : "false");
 }
 
 
@@ -450,7 +454,7 @@ Gamepad::PadIn map_remote(const InputState& state) {
 void drain_physical_to_latest() {
     // Physical producers continue while remote owns output. Discard their old
     // history, retain the latest state, and never replay a burst on handoff.
-    for (unsigned i = 0; i < Gamepad::PAD_IN_QUEUE_SIZE + Gamepad::BT_PAD_STAGING_SLOTS + 1; ++i) {
+    for (unsigned i = 0; i < Gamepad::PAD_IN_QUEUE_SIZE + 1; ++i) {
         if (!physical_pad->new_pad_in()) break;
         latest_physical = physical_pad->get_pad_in();
     }
@@ -612,13 +616,11 @@ void begin(Gamepad& local, DeviceDriverType driver) {
     core_mode_target = BOOT_MODE;
     mode_handoff = false;
     network_waiting.store(false);
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     for (auto& cmd : core_requests) {
         cmd.abandoned.store(false, std::memory_order_relaxed);
         cmd.state.store(0, std::memory_order_release);
     }
     core_request_rr = 0;
-#endif
     network_owner_until.store(0);
     clear_owner_requested.store(false);
     pending_release_token.store(0);
@@ -642,15 +644,14 @@ void apply_profile_on_radio_core() {
     }
     unsigned expected = Ready;
     if (!apply_stage.compare_exchange_strong(expected, Applying, std::memory_order_acq_rel)) return;
-    physical_pad->set_profile(profile_to_apply, output_driver);
-    physical_pad->set_bluetooth_calibration(calibration_to_apply);
+    // No Gamepad mutation on the radio core. Earlier Bluetooth callbacks have
+    // completed, and new report callbacks remain gated until Core0 commits.
     apply_stage.store(RadioDone, std::memory_order_release);
 }
 
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-// One bounded command per Core0 service visit, outside any Core0 mailbox
-// lock. This routine is noinline to avoid stacking the JSON parser workspace
-// on top of the USB/input processing stack frame.
+// One borrowed request per radio service visit, outside the shared mailbox
+// lock and outside transport receive callbacks. JSON work never runs in the
+// Core0 USB service loop.
 [[gnu::noinline]] void consume_core_request() {
     for (unsigned attempt = 0; attempt < CORE_REQUEST_SLOTS; ++attempt) {
         const unsigned id = (core_request_rr + attempt) % CORE_REQUEST_SLOTS;
@@ -666,7 +667,7 @@ void apply_profile_on_radio_core() {
                                  cmd.output, cmd.capacity, cmd.received_at);
         } else cmd.result = {0, 0, false};
         // The legacy mailbox may occasionally be owned by the other core.
-        // Core0 must retry this still-unconsumed request on its next tick,
+        // The radio service retries this request on its next poll,
         // rather than emitting service_busy over a long-running connection.
         // Only the exact, pre-side-effect busy result may be retried.
         constexpr char busy[] = "{\"ok\":false,\"error\":\"service_busy\"}";
@@ -680,16 +681,24 @@ void apply_profile_on_radio_core() {
         break;
     }
 }
-#endif
+
+void service_network_requests() {
+    if (!initialized) return;
+    consume_core_request();
+}
 
 void tick(uint32_t now_ms) {
     if (!initialized) return;
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-    consume_core_request();
-#endif
 
     if (apply_stage.load(std::memory_order_acquire) == RadioDone) {
+        physical_pad->set_profile(profile_to_apply, output_driver);
+        physical_pad->set_bluetooth_calibration(calibration_to_apply);
         remote_pad.set_profile(profile_to_apply, output_driver);
+        // USB service continued while the radio acknowledged. Discard reports
+        // mapped with the previous profile before resuming Bluetooth reports.
+        physical_pad->reset_pad_in();
+        remote_pad.reset_pad_in();
+        latest_physical = Gamepad::PadIn{};
         core_applied_profile_id = profile_to_apply.id;
         if (remote_selected && have_remote_raw)
             remote_pad.set_pad_in_latest(map_remote(last_remote_raw));
@@ -799,12 +808,14 @@ void tick(uint32_t now_ms) {
     selected_generation = generation;
     remote_selected = active;
 
-    if (desired_mode != Mode::Physical || mode_handoff || maintenance.load(std::memory_order_acquire) ||
+    if (desired_mode != Mode::Physical || mode_handoff || profile_apply_pending() ||
+        maintenance.load(std::memory_order_acquire) ||
         owner_selected || remote_selected || handoff_active)
         drain_physical_to_latest();
     else latest_physical = physical_pad->peek_latest_pad_in();
 
-    if (maintenance.load(std::memory_order_acquire) || desired_mode == Mode::Configure || mode_handoff) {
+    if (maintenance.load(std::memory_order_acquire) || desired_mode == Mode::Configure ||
+        mode_handoff || profile_apply_pending()) {
         remote_pad.set_pad_in_latest(Gamepad::PadIn{});
         core_snapshot.source = Source::Neutral;
     } else if (remote_selected) {
@@ -851,6 +862,7 @@ void tick(uint32_t now_ms) {
 
 Gamepad& output_gamepad(Gamepad& local) {
     return initialized && (requested_mode.load(std::memory_order_acquire) != Mode::Physical || mode_handoff ||
+                           profile_apply_pending() ||
                            owner_selected || remote_selected || handoff_active ||
                            maintenance.load(std::memory_order_acquire))
                ? remote_pad : local;
@@ -881,11 +893,12 @@ bool bluetooth_input_allowed() {
 
 bool physical_output_enabled() {
     return !initialized || (requested_mode.load(std::memory_order_acquire) == Mode::Physical &&
-                           applied_mode.load(std::memory_order_acquire) == Mode::Physical && !maintenance.load());
+                           applied_mode.load(std::memory_order_acquire) == Mode::Physical &&
+                           !profile_apply_pending() && !maintenance.load());
 }
 
 bool configuration_allowed() {
-    return !BLUETOOTH_SUPPORTED || (requested_mode.load(std::memory_order_acquire) == Mode::Configure && !mode_pending());
+    return !PHYSICAL_SUPPORTED || (requested_mode.load(std::memory_order_acquire) == Mode::Configure && !mode_pending());
 }
 
 void on_bluetooth_input(const ControllerSample& sample, uint32_t now_ms) {
@@ -955,8 +968,8 @@ HttpResult handle_request(const char* method, const char* path,
         else if (json.equals(field, "physical")) wanted = Mode::Physical;
         else if (json.equals(field, "configure")) wanted = Mode::Configure;
         else return error_response(output, capacity, 400, "invalid_control_mode");
-        if (!BLUETOOTH_SUPPORTED && wanted != Mode::Wifi)
-            return error_response(output, capacity, 409, "bluetooth_not_supported");
+        if (!PHYSICAL_SUPPORTED && wanted != Mode::Wifi)
+            return error_response(output, capacity, 409, "physical_not_supported");
         if (!try_lock_network()) return error_response(output, capacity, 503, "service_busy");
         if (shared.save_pending) { unlock(); return error_response(output, capacity, 409, "save_pending_restart"); }
         if (wanted != requested_mode.load(std::memory_order_relaxed)) {
@@ -973,7 +986,7 @@ HttpResult handle_request(const char* method, const char* path,
          !std::strcmp(path, "/api/control/heartbeat")) &&
         (requested_mode.load(std::memory_order_acquire) != Mode::Wifi || mode_pending()))
         return error_response(output, capacity, 409, "wifi_mode_required");
-    if (BLUETOOTH_SUPPORTED && !std::strncmp(path, "/api/profile", 12) &&
+    if (PHYSICAL_SUPPORTED && !std::strncmp(path, "/api/profile", 12) &&
         (requested_mode.load(std::memory_order_acquire) != Mode::Configure || mode_pending()))
         return error_response(output, capacity, 409, "configuration_mode_required");
 
@@ -1126,7 +1139,6 @@ HttpResult handle_ws(const char* body, size_t length,
                           body, length, output, capacity, now);
 }
 
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
 bool submit_core_request(unsigned slot, bool websocket, const char* method,
                          const char* path, const char* body, size_t length,
                          char* response, size_t capacity, uint32_t received_at) {
@@ -1174,7 +1186,6 @@ void abandon_core_request(unsigned slot) {
     if (slot < CORE_REQUEST_SLOTS)
         core_requests[slot].abandoned.store(true, std::memory_order_release);
 }
-#endif
 
 void release_token(uint32_t token, uint32_t now) {
     if (!initialized || !token) return;

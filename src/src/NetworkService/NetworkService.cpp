@@ -71,7 +71,7 @@ struct Client {
     bool dispatch_deferred{};
     bool pong_pending{};
     uint32_t pong_id{};
-    // Clone: Core0 owns the controller RPC while this flag is set. No received
+    // Core0 owns the controller RPC while this flag is set. No received
     // bytes or output buffer can be modified before the completion is consumed.
     bool core_pending{};
     bool core_websocket{};
@@ -109,20 +109,17 @@ struct Client {
 };
 
 Client clients[CLIENT_COUNT];
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
 static_assert(CLIENT_COUNT == RemoteControl::CORE_REQUEST_SLOTS,
               "Each network client requires exactly one Core0 RPC slot");
 unsigned client_slot(const Client& client) {
     return static_cast<unsigned>(&client - clients);
 }
-#endif
 char device_id[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1]{};
 char ap_ssid[33]{};
 std::atomic<bool> service_ready{false};
 std::atomic<uint8_t> save_completion{0}; // Bit 0: ready; bit 1: peer TCP acknowledgement.
 std::atomic<uint32_t> runtime_bits{0};
 std::atomic<uint8_t> health_bits{0};
-#if !defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
 // Bit layout: ready, AP active, STA configured, STA connected, joining.
 // Release-store the flags last so Core0 never needs the mutable radio structs.
 std::atomic<std::uint32_t> oled_network_flags{0};
@@ -156,7 +153,6 @@ void publish_oled_network(const Transport::Status& st) {
         (st.station_configured ? 4u : 0u) | (st.station_connected ? 8u : 0u) |
         (st.station_joining ? 16u : 0u), std::memory_order_release);
 }
-#endif
 std::atomic<SaveAction> pending_action{SaveAction::None};
 std::atomic<uint8_t> install_cancel_state{0}; // 0 idle, 1 discard requested, 2 Core0 discarded.
 uint32_t request_count{};
@@ -293,7 +289,6 @@ void release_control(Client& client) {
 }
 
 void forget(Client &client) {
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     if (client.core_pending) {
         // The borrowed request/response buffers still belong to Core0. Keep
         // this slot reserved until the consumer publishes a completion.
@@ -302,7 +297,6 @@ void forget(Client &client) {
         RemoteControl::abandon_core_request(client_slot(client));
         return;
     }
-#endif
     release_control(client);
     if (client.save_response && !client.save_completed) {
         switch (client.save_action) {
@@ -327,14 +321,12 @@ void forget(Client &client) {
 void close_client(Client &client, bool abort = false) {
     if (client.handle == Transport::INVALID_HANDLE)
         return;
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     if (client.core_pending) {
         client.core_abandoned = true;
         RemoteControl::abandon_core_request(client_slot(client));
         // Do not drop ownership until completion: Core0 may be performing an
         // acquire right now. forget() releases it once the result is consumed.
     } else
-#endif
     release_control(client);
     client.dispatch_deferred = false;
     client.transport_closing = true;
@@ -547,9 +539,6 @@ bool defer_busy(Client &client, unsigned status, const char* response, size_t le
 
 bool dispatch_message(Client &client, const uint8_t *payload, size_t length, uint32_t received_at) {
     RefreshTransportGuard guard;
-#if !defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-    char response[384];
-#endif
     const uint32_t now = now_ms();
     const auto header = message_header(payload, length);
     if (header.kind != MessageHeader::Kind::Control) {
@@ -574,7 +563,6 @@ bool dispatch_message(Client &client, const uint8_t *payload, size_t length, uin
             }
         }
     }
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     // POST JSON is copied into the fixed Core0 RPC slot. In particular, the
     // WebSocket wire buffer is masked again below; Core0 must not borrow it.
     if (client.core_pending) return false;
@@ -592,24 +580,6 @@ bool dispatch_message(Client &client, const uint8_t *payload, size_t length, uin
     client.core_token = submitted_token;
     client.dispatch_deferred = false;
     return false;
-#else
-    const auto result = RemoteControl::handle_ws(reinterpret_cast<const char *>(payload), length,
-                                                 response, sizeof(response), received_at);
-    if (defer_busy(client, result.status, response, result.length)) return false;
-    client.dispatch_deferred = false;
-    if (result.status < 400 && submitted_token)
-        client.control_token = static_cast<uint32_t>(submitted_token);
-    // Input is processed even when TCP has outstanding response data. Successful
-    // acknowledgements are deliberately low-rate, so browser buffering cannot
-    // turn a tiny input stream into a large bidirectional queue.
-    if (result.status >= 400 || uint32_t(now - client.last_ack) >= 500) {
-        if (!client.response_pending && result.length < sizeof(response)) {
-            websocket_send(client, 1, reinterpret_cast<const uint8_t *>(response), result.length);
-            client.last_ack = now;
-        }
-    }
-    return true;
-#endif
 }
 
 void process_websocket(Client &client) {
@@ -665,10 +635,8 @@ void process_websocket(Client &client) {
                 client.rx_length = 0;
                 return;
             }
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
             client.core_frame_length = static_cast<uint32_t>(frame.header_length + frame.payload_length);
             client.core_fragmented = false;
-#endif
             if (!dispatch_message(client, payload, frame.payload_length, client.rx_received_at)) {
                 // Keep the original wire frame for the next poll. New bytes
                 // may follow it, but can neither overtake nor duplicate it.
@@ -696,10 +664,8 @@ void process_websocket(Client &client) {
                 }
                 // Fragment timestamp remains pinned to the first fragment so
                 // a delayed continuation cannot refresh an old sample.
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
                 client.core_frame_length = static_cast<uint32_t>(frame.header_length + frame.payload_length);
                 client.core_fragmented = true;
-#endif
                 if (!dispatch_message(client, client.fragment, client.fragment_length,
                                       client.fragment_received_at)) {
                     // The preceding fragments are already retained. Undo only
@@ -1107,7 +1073,6 @@ void dispatch_http(Client &client, const WebProtocol::Request &request) {
         error_reply(client, 503, "network_initializing");
         return;
     }
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     // Consume controller/profile/status HTTP work on Core0. The original
     // request stays pinned in client.rx until Core0 acknowledges completion.
     if (client.core_pending) return;
@@ -1126,66 +1091,10 @@ void dispatch_http(Client &client, const WebProtocol::Request &request) {
     std::strncpy(client.core_path, request.path, sizeof(client.core_path) - 1);
     client.core_path[sizeof(client.core_path) - 1] = '\0';
     return;
-#else
-    auto result =
-        RemoteControl::handle_request(request.method, request.path, body, request.body_length,
-                                      client.response, sizeof(client.response),
-                                      input_sample ? client.dispatch_started : now_ms());
-    // Acquiring control is safe to defer: service_busy happens *before* a
-    // lease is created. Do not lengthen the deadline for input, heartbeat,
-    // release or any update/configuration operation.
-    const uint32_t busy_limit = post && !std::strcmp(request.path, "/api/control/acquire")
-        ? ACQUIRE_RETRY_LIMIT_MS : SERVICE_RETRY_LIMIT_MS;
-    if (defer_busy(client, result.status, client.response, result.length, busy_limit)) return;
-    if (result.length >= sizeof(client.response)) {
-        error_reply(client, 500, "response_too_large");
-        return;
-    }
-    if (!std::strcmp(request.method, "GET") && !std::strcmp(request.path, "/api/status") &&
-        result.status == 200 && result.length > 0 && client.response[result.length - 1] == '}') {
-        constexpr char prefix[] = ",\"network\":";
-        const size_t start = result.length - 1;
-        if (sizeof(client.response) - start <= sizeof(prefix) + 1) {
-            error_reply(client, 500, "response_too_large");
-            return;
-        }
-        std::memcpy(client.response + start, prefix, sizeof(prefix) - 1);
-        // Serialize in place, reserving the outer closing brace and terminator.
-        // Avoid another large temporary on the radio core's limited stack.
-        const size_t length = network_json(client.response + start + sizeof(prefix) - 1,
-                                           sizeof(client.response) - start - sizeof(prefix));
-        if (!length) {
-            error_reply(client, 500, "response_too_large");
-            return;
-        }
-        result.length = start + sizeof(prefix) - 1 + length;
-        client.response[result.length++] = '}';
-        client.response[result.length] = 0;
-    }
-    if (!post && result.status == 200 &&
-        (!std::strcmp(request.path, "/api/profile") ||
-         !std::strcmp(request.path, "/api/profiles")))
-        OledDisplay::notify(OledDisplay::Activity::ProfileLoad);
-    if (post && result.status >= 200 && result.status < 300) {
-        if (!std::strcmp(request.path, "/api/profile/select"))
-            OledDisplay::notify(OledDisplay::Activity::ProfileLoad);
-        else if (!std::strcmp(request.path, "/api/profile") && result.status == 202)
-            OledDisplay::notify(OledDisplay::Activity::ProfileApply);
-        else if (result.save_response)
-            OledDisplay::notify(OledDisplay::Activity::ProfileSave);
-    }
-    if (result.save_response) {
-        client.save_action = SaveAction::Profile;
-        pending_action.store(SaveAction::Profile, std::memory_order_release);
-    }
-    reply(client, result.status, reinterpret_cast<const uint8_t *>(client.response), result.length,
-          "application/json", false, result.save_response);
-#endif
 }
 
-// The radio/ESP transport and Core0 communicate through a fixed completion
+// Either radio transport and Core0 communicate through a fixed completion
 // slot. This finalizer runs on the radio poll, never during the UART callback.
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
 void complete_core_requests() {
     for (auto& client : clients) {
         if (!client.core_pending) continue;
@@ -1285,14 +1194,12 @@ void complete_core_requests() {
         }
     }
 }
-#endif
 
 void on_receive(Transport::Handle handle, const uint8_t *bytes, size_t length) {
     Client *client = find_client(handle);
     if (!client || client->transport_closing || !length)
         return;
     client->last_activity = now_ms();
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
     // A Core0 RPC owns the current request, but incoming WebSocket bytes are
     // still part of a continuous TCP stream. Do not discard them: the next
     // frame may arrive (or be split across UART callbacks) before completion.
@@ -1300,7 +1207,6 @@ void on_receive(Transport::Handle handle, const uint8_t *bytes, size_t length) {
     // bytes does not mutate a buffer borrowed by Core0. HTTP bodies, in
     // contrast, are borrowed from client.rx and must remain untouched.
     if (client->core_pending && !client->websocket) return;
-#endif
     if (client->closing || client->close_after_send ||
         (!client->websocket && (client->response_pending || client->dispatch_deferred)))
         return;
@@ -1326,9 +1232,7 @@ void on_receive(Transport::Handle handle, const uint8_t *bytes, size_t length) {
         // Leave all parsing/consumption until Core0 completes the request
         // pinned at the front of rx. Received bytes remain buffered in order.
         if (!client->upgrade_pending && !client->dispatch_deferred
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
             && !client->core_pending
-#endif
         ) process_websocket(*client);
     } else {
         WebProtocol::Request request;
@@ -1344,12 +1248,10 @@ void on_receive(Transport::Handle handle, const uint8_t *bytes, size_t length) {
 
 void on_read_closed(Transport::Handle handle) {
     if (Client *client = find_client(handle)) {
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
         if (client->core_pending) {
             client->core_abandoned = true;
             RemoteControl::abandon_core_request(client_slot(*client));
         } else
-#endif
         release_control(*client);
         client->dispatch_deferred = false;
         client->rx_length = client->fragment_length = 0;
@@ -1441,9 +1343,7 @@ bool on_connected(Transport::Handle handle) {
     for (auto &client : clients) {
         if (client.handle)
             continue;
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
         if (RemoteControl::core_request_busy(client_slot(client))) continue;
-#endif
         // Assigning a value-initialized Client can materialize a >11 KiB stack
         // temporary. Clear this fixed workspace directly instead.
         std::memset(static_cast<void *>(&client), 0, sizeof(client));
@@ -1483,16 +1383,12 @@ bool start() {
 void poll() {
     refresh_transport_guard();
     Transport::poll(now_ms());
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
+    // Parse requests and format responses on the radio core. Core0 exchanges
+    // validated controller state and snapshots; it never executes HTTP/JSON.
+    RemoteControl::service_network_requests();
     complete_core_requests();
-#endif
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-    // Clone: independent ESP8285; continue servicing the OLED on its existing core.
-    OledDisplay::service(now_ms(), Transport::status());
-#else
-    // Official Pico W: I2C must never block the shared CYW43/BTstack radio loop.
+    // Both radio backends publish snapshots; OLED I2C belongs to Core0.
     publish_oled_network(Transport::status());
-#endif
     // Cancel both in-flight reply completions and Core0's settling timer before
     // reopening the gate. Otherwise an old delayed install could arm a newly
     // uploaded image after a recoverable pre-install validation failure.
@@ -1514,7 +1410,7 @@ void poll() {
         }
     }
     // On Pico W the BTstack timer runs in the SDK radio async context. On the
-    // clone this is the core1 loop, serialized with its physical host parsing.
+    // ESP backend this is the Core1 loop; USB parsing belongs to Core0.
     // This operation is bounded and never waits, allocates, or touches flash.
     RemoteControl::apply_profile_on_radio_core();
     const auto transport = Transport::status();
@@ -1589,7 +1485,7 @@ void start_radio_poll() {
 
 // Called on Core0 only. Both the official CYW43 board and the ESP8285 clone
 // publish existing input ownership; the OLED never queries Bluetooth directly.
-static void publish_oled_input_sources(std::uint32_t now_ms) {
+static void publish_oled_input_sources([[maybe_unused]] std::uint32_t now_ms) {
     // Read-only controller metadata. Both sources are already maintained by the
     // ordinary input pipeline; do not wake or poll the radio for OLED content.
     OledDisplay::InputKind bt_kind=OledDisplay::InputKind::Generic;
@@ -1642,20 +1538,22 @@ static void publish_oled_input_sources(std::uint32_t now_ms) {
 }
 
 void service_display_from_core0(std::uint32_t now_ms) {
+    // Advance only the hardware FIFO between render visits; this never waits
+    // for the OLED bus and does no drawing or response formatting.
+    OledDisplay::poll_transfer();
     // Input metadata is cheap, but there is no reason to sample it every USB
-    // iteration. This also supplies the clone's Core1 OLED with an atomic view.
+    // iteration. Both radio backends supply the same atomic network view.
     static std::uint32_t next_sources{};
     if (static_cast<std::int32_t>(now_ms-next_sources)>=0) {
         next_sources=now_ms+100u;
         publish_oled_input_sources(now_ms);
     }
 
-#if !defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-    // 5-ms service cadence. The OLED retains its 16-byte I2C chunks,
-    // bounding interruption of Xbox USB device processing to ~0.4 ms.
+    // Both radio boards retain the OLED driver's 2-ms render/chunk cadence.
+    // The bus transaction advances nonblocking above, independently of render.
     static std::uint32_t next_service{};
     if (static_cast<std::int32_t>(now_ms - next_service) < 0) return;
-    next_service = now_ms + 5u;
+    next_service = now_ms + 2u;
     const std::uint32_t flags = oled_network_flags.load(std::memory_order_acquire);
     const std::uint32_t ipv4 = oled_station_ipv4.load(std::memory_order_relaxed);
     Transport::Status snapshot{};
@@ -1674,9 +1572,6 @@ void service_display_from_core0(std::uint32_t now_ms) {
     }
     snapshot.station_ip = station_ip;
     OledDisplay::service(now_ms, snapshot);
-#else
-    (void)now_ms;
-#endif
 }
 
 void note_runtime(bool usb, bool bluetooth, bool wired, bool remote_owned) {

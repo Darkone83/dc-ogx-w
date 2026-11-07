@@ -70,12 +70,11 @@ else()
     add_compile_definitions(DC_OGX_OLED_FADE_ENABLED=0)
 endif()
 
-# Experimental dual-USB host/device bring-up on the DC-OGX-W carrier PCB.
+# Shared reference USB host/device path on the DC-OGX-W carrier PCB.
 # Native USB stays as a console USB device; PIO-USB uses consecutive GP9/GP10.
-# Leave this OFF for stable builds. Enable explicitly for a hardware test.
 set(DC_OGX_USB_HOST_DP_PIN 9 CACHE STRING "USB host D+ RP2040 GPIO")
 set(DC_OGX_USB_HOST_DM_PIN 10 CACHE STRING "USB host D- RP2040 GPIO")
-option(DC_OGX_USB_HOST_ENABLED "Experimental PIO USB wired controller input" ON)
+option(DC_OGX_USB_HOST_ENABLED "PIO USB wired controller input" ON)
 if(NOT DC_OGX_USB_HOST_DP_PIN STREQUAL "9" OR NOT DC_OGX_USB_HOST_DM_PIN STREQUAL "10")
     message(FATAL_ERROR "DC-OGX-W USB host PCB is wired GP9 (D+) / GP10 (D-)")
 endif()
@@ -87,16 +86,15 @@ if(DC_OGX_USB_HOST_ENABLED)
 endif()
 
 # Board capabilities are fixed by the hardware, not independent feature toggles.
+set(SYSCLOCK_KHZ 240000 CACHE STRING "RP2040 system clock in kHz")
 if(PICO_BOARD STREQUAL "pico_w")
     set(DC_OGX_HAS_BLUETOOTH TRUE)
-    set(SYSCLOCK_KHZ 240000 CACHE STRING "RP2040 system clock in kHz")
     add_compile_definitions(CONFIG_OGXM_BOARD_PI_PICOW=1 CONFIG_EN_BLUETOOTH=1)
 elseif(PICO_BOARD STREQUAL "pico_w_2023")
     set(DC_OGX_HAS_BLUETOOTH FALSE)
     if(OGXM_WIFI_PASSWORD MATCHES ",")
         message(FATAL_ERROR "The ESP8285 AT transport does not support commas in OGXM_WIFI_PASSWORD")
     endif()
-    set(SYSCLOCK_KHZ 120000 CACHE STRING "RP2040 system clock in kHz")
     add_compile_definitions(CONFIG_OGXM_BOARD_PI_PICOW_2023=1)
     set(OGXM_ESP_UART_ID 0 CACHE STRING "ESP8285 UART controller")
     set(OGXM_ESP_UART_TX_PIN 0 CACHE STRING "RP2040 TX pin connected to ESP8285 RX")

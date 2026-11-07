@@ -17,11 +17,7 @@
 #define BOARDS_COUNT        13
 
 #ifndef SYSCLOCK_KHZ
-    #if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-        #define SYSCLOCK_KHZ 120000
-    #else
-        #define SYSCLOCK_KHZ 240000
-    #endif
+    #define SYSCLOCK_KHZ 240000
 #endif
 
 #ifndef MAX_GAMEPADS
@@ -198,8 +194,9 @@
     }
 #endif // defined(PIO_USB_DP_PIN)
 
-/* Boards that run the Pico W firmware path (CYW43439 BT + optional PIO USB host mux). */
+/* The RP2040 runtime is shared; only the attached radio backend differs. */
 #if defined(CONFIG_OGXM_BOARD_PI_PICOW) || defined(CONFIG_OGXM_BOARD_PI_PICO2W) || \
+    defined(CONFIG_OGXM_BOARD_PI_PICOW_2023) || \
     (defined(CONFIG_OGXM_BOARD_RP2354) && defined(CONFIG_EN_BLUETOOTH))
     #define OGXM_BOARD_USES_PICO_W_FIRMWARE 1
 #endif

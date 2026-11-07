@@ -3,8 +3,7 @@
 #include "NetworkService/Transport.h"
 
 // Optional SSD1306 display on RP2040 I2C1: SDA GP14, SCL GP15.
-// Hardware and frame buffer are owned exclusively by the network core.
-// Core0 only publishes one atomic controller snapshot; it never drives I2C.
+// Hardware and frame buffer are owned by Core0; the radio publishes atomic settings.
 namespace OledDisplay {
 // Short status messages from successfully accepted configuration operations.
 // Events are a one-word atomic mailbox; callers never drive I2C.
@@ -32,6 +31,8 @@ enum class InputKind : std::uint8_t {
 };
 void publish_input_devices(bool bluetooth_connected, InputKind bluetooth_type, bool bluetooth_le,
                            bool wired_connected, InputKind wired_type);
+// Core0: advance at most one FIFO of an existing transfer, without rendering.
+void poll_transfer();
 void service(std::uint32_t now_ms, const NetworkService::Transport::Status& network);
 bool detected();
 } // namespace OledDisplay

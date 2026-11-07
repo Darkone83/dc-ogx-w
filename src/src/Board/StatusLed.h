@@ -27,7 +27,10 @@ struct State {
 enum class Phase : std::uint8_t {
     Off, Starting, AccessPoint, JoiningWifi, ReconnectingWifi, WifiFailed,
     UsbDisconnected, InputPaused, Updating, Error, ProfileChanged,
-    WifiConnected, ControlActive, Profile, Test
+    WifiConnected, ControlActive, Profile, Test,
+    // Transient USB host bring-up markers, appended after persisted phases.
+    UsbWaitRadio, UsbDebounce, UsbHandoff, UsbInit, UsbEnumerating,
+    UsbMounted, UsbFault
 };
 
 struct Snapshot {
@@ -43,6 +46,10 @@ struct Snapshot {
 
 void initialize();
 void tick(std::uint32_t now_ms, const State& state);
+// Core0-only direct markers. Static colors remain latched if host code blocks.
+// No extra PIO timer, IRQ, DMA, Bluetooth calls or polling are introduced.
+void show_usb_phase(Phase phase);
+void clear_usb_phase();
 // Read-only status can be queried from the network core.
 bool available();
 const char* state_name();

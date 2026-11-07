@@ -7,7 +7,6 @@
 #include <hardware/clocks.h>
 #include <hardware/gpio.h>
 #include <pico/multicore.h>
-#include <pico/flash.h>
 #include <pico/time.h>
 #include "tusb.h"
 #include "bsp/board_api.h"
@@ -27,27 +26,32 @@
 #include "Board/board_api.h"
 #include "Board/board_api_private/board_api_private.h"
 #include "Board/ogxm_log.h"
+#if defined(CONFIG_EN_BLUETOOTH)
 #include "Bluepad32/Bluepad32.h"
 #include "BLEServer/BLEServer.h"
-#include "Gamepad/Gamepad.h"
-#include "TaskQueue/TaskQueue.h"
-#if defined(CONFIG_EN_USB_HOST) && defined(CONFIG_OGXM_USB_DEVICE_ONLY)
-#include "USBHost/WiredHost.h"
+#else
+// The carrier's clone changes only the radio backend; retain the same USB path.
+namespace bluepad32 {
+inline bool any_connected() { return false; }
+inline void wired_usb_takeover_disconnect_bt() {}
+inline void wired_usb_release_enable_bt_pairing() {}
+}
 #endif
-#if defined(CONFIG_OGXM_NETWORK)
-#include "NetworkService/NetworkService.h"
 #include "DeviceServices/DeviceServices.h"
 #include "FirmwareUpdate/FirmwareUpdate.h"
+#include "NetworkService/NetworkService.h"
+#include "OGXMini/Board/RadioBackend.h"
 #include "RemoteControl/RemoteControl.h"
-static bool s_network_mode = false;
-#endif
+#include "Gamepad/Gamepad.h"
+#include "TaskQueue/TaskQueue.h"
 
-#if defined(CONFIG_EN_USB_HOST) && !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
+#if defined(CONFIG_EN_USB_HOST)
 #include "host/hcd.h"
 #include "pio_usb.h"
 #include "USBHost/HostManager.h"
 #include "Input/InputSlot.h"
 #include <pico/flash.h>
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
 #include "Wii/WiiReportConverter.h"
 
 /** Called from flash_safe_execute on Core1; only write flash. Reboot is done by caller after return. */
@@ -65,11 +69,12 @@ static WiimoteReport s_wiimote_report = {};  // shared: Core0 reads, Core1 write
 
 extern "C" void wii_led_on(void)  { board_api::set_led(true); }
 extern "C" void wii_led_off(void) { board_api::set_led(false); }
+#endif // !CONFIG_OGXM_USB_DEVICE_ONLY
 #endif
 
 Gamepad _gamepads[MAX_GAMEPADS];
 
-#if defined(CONFIG_EN_USB_HOST) && !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
+#if defined(CONFIG_EN_USB_HOST)
 // PIO USB host normally uses an alarm_pool SOF timer (~1 kHz). On Pico W that collides with BTstack / TaskQueue
 // timer IRQs (see prior irq_set_exclusive_handler assert) and fixed alarm indices (alarm 3 "already claimed").
 // Use skip_alarm_pool + pio_usb_host_frame() every ~1 ms from Core0 main loop (or Wii Core1 loop).
@@ -117,12 +122,11 @@ static void pico_w_usb_sof_timer_stop() {
     s_pico_w_usb_sof_hw_timer = false;
 }
 
-/** Debounce any unplug hint (line / stack) past USB bus reset glitches (10–50 ms). */
+/** Debounce any unplug hint (line / stack / idle) past USB bus reset glitches (10–50 ms). */
 constexpr int32_t USB_UNPLUG_DEBOUNCE_US = 60 * 1000;
-/** Idle-input unplug was removed for [#87](https://github.com/MegaCadeDev/OGX-Mini-2026/issues/87):
- *  report-on-change pads (8BitDo Ultimate 2 2.4 GHz dongle) stop IN while still connected;
- *  treating that as unplug tore the host down after a few quiet seconds. Physical unplug is
- *  detected via HCD disconnect and/or TinyUSB dropping the configured device. */
+/** If D+/D− never read as SE0 under PIO, IN reports stop when the cable is pulled — detect unplug this way.
+ *  Keep high enough that HID pads that only report on change are not mistaken for unplug. */
+constexpr uint32_t USB_UNPLUG_NO_INPUT_MS = 3000;
 static bool s_usb_unplug_debounce_armed = false;
 static absolute_time_t s_usb_unplug_debounce_since;
 
@@ -147,35 +151,10 @@ static void pico_w_usb_host_full_stop() {
     board_api_usbh::enable_host_line_irq_monitoring();
 }
 
-namespace board_api_usbh {
-
-/**
- * Strong override of the weak empty stub in board_api_usbh.cpp.
- * Mode switch (store_driver_type → disconnect_all → NVS write → reboot) must
- * stop the 1 kHz SOF timer and halt Core1 (BTstack) before flash erase/program.
- */
-void stop_pio_usb_host() {
-    OGXM_LOG("PicoW: stop_pio_usb_host (SOF stop + Core1 reset + tuh_deinit)\n");
-    pico_w_usb_sof_timer_stop();
-    multicore_reset_core1();
-    sleep_ms(50);
-    if (s_pio_usb_tuh_inited) {
-        (void)tuh_deinit(BOARD_TUH_RHPORT);
-        s_pio_usb_tuh_inited = false;
-    }
-    s_usb_line_debounce_armed = false;
-    s_usb_unplug_debounce_armed = false;
-    enable_host_line_irq_monitoring();
-}
-
-} // namespace board_api_usbh
-
 /**
  * Runs every ~1 ms from Core0 (normal Pico W modes) or from Core1 (GPIO modes that block Core0 in run_task).
  * - If any BT gamepad is connected: PIO USB host is not initialized (wired ignored until BT disconnects).
- * - If the PIO USB host is up (cable line stable / enumerating / mounted): disconnect BT pads and block
- *   new BT connections until the host is torn down on unplug. Do not re-enable scans between tuh_init
- *   and first mount — that window is when DualShock 4 enumeration fails under CYW43 load (#47).
+ * - If a wired device enumerates on the PIO port: disconnect BT pads and block new BT connections until unplugged.
  */
 static void pico_w_pio_usb_bt_mux_tick() {
     HostManager& hm = HostManager::get_instance();
@@ -189,29 +168,22 @@ static void pico_w_pio_usb_bt_mux_tick() {
     if (bt_active && !wired_mounted) {
         if (s_pio_usb_tuh_inited) {
             pico_w_usb_host_full_stop();
-            if (s_bt_new_conn_off_for_usb) {
-                s_bt_new_conn_off_for_usb = false;
-                bluepad32::wired_usb_release_enable_bt_pairing();
-            }
         }
         return;
     }
 
     /* Unplug: pio_usb_bus_get_line_state() uses gpio_get on D+/D− while PIO owns them — often never
-     * reads SE0 when the cable is removed (floating FS-idle), so HCD "connect" can stay true. Prefer
-     * TinyUSB configured-device loss; also honor HCD disconnect when it does fire.
-     * Do NOT use "no process_report for N ms" — silent-but-connected pads (#87 Ultimate 2 dongle)
-     * look identical to a pulled cable on that metric and were false-unplugged. */
+     * reads SE0 when the cable is removed (floating FS-idle), so HCD "connect" stays true. Use any of:
+     * HCD line, TinyUSB configured device gone, or no process_report() for USB_UNPLUG_NO_INPUT_MS. */
     if (s_pio_usb_tuh_inited) {
         const bool hcd_line_connected = hcd_port_connect_status(BOARD_TUH_RHPORT);
         board_api_usbh::store_host_line_connected(hcd_line_connected);
-        (void)hcd_line_connected;
 
         const bool tuh_still_has_device = pico_w_tuh_any_device_configured();
-        /* Tear down only when TinyUSB drops the configured device. Brief HCD
-         * disconnect glitches alone were killing Ultimate 2 mid-play (#87 rare
-         * drop + freeze). Real cable pull clears tuh_mounted; do not trust HCD alone. */
-        const bool unplug_hint = wired_mounted && !tuh_still_has_device;
+        const uint32_t input_idle_ms = hm.usb_host_input_idle_ms();
+
+        const bool unplug_hint = wired_mounted &&
+            (!hcd_line_connected || !tuh_still_has_device || (input_idle_ms >= USB_UNPLUG_NO_INPUT_MS));
 
         if (unplug_hint) {
             if (!s_usb_unplug_debounce_armed) {
@@ -244,13 +216,6 @@ static void pico_w_pio_usb_bt_mux_tick() {
         if (absolute_time_diff_us(s_usb_line_high_since, get_absolute_time()) < PIO_LINE_STABLE_US) {
             return;
         }
-        /* Quiet CYW43 BT *before* tuh_init. BR/LE inquiry during DS4/XBO enumeration starves PIO SOF
-         * on Pico W / 2 W (#47). Keep quiet for the whole host-up window, not only after mount —
-         * the old !wired_mounted branch re-enabled scans mid-enumeration and broke first-party DS4. */
-        if (!s_bt_new_conn_off_for_usb) {
-            bluepad32::wired_usb_takeover_disconnect_bt();
-            s_bt_new_conn_off_for_usb = true;
-        }
         // main() already called flash_safe_execute_core_init() on Core0; do not call from Core1 BT timer (deadlock risk).
         hm.initialize(_gamepads);
         // PIO USB takes over D+/D−; GPIO edge IRQs on those pins must be off or IO_IRQ floods and BT stalls.
@@ -262,8 +227,6 @@ static void pico_w_pio_usb_bt_mux_tick() {
         tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
         if (!tuh_init(BOARD_TUH_RHPORT)) {
             s_usb_line_debounce_armed = false;
-            s_bt_new_conn_off_for_usb = false;
-            bluepad32::wired_usb_release_enable_bt_pairing();
             return;
         }
         s_pio_usb_tuh_inited = true;
@@ -287,11 +250,16 @@ static void pico_w_pio_usb_bt_mux_tick() {
         }
     }
 
-    /* While PIO USB host is up (enumerating or mounted), keep BT scans off. Release only in
-     * pico_w_usb_host_full_stop() after unplug / BT-priority teardown. */
-    if (s_pio_usb_tuh_inited && !s_bt_new_conn_off_for_usb) {
-        bluepad32::wired_usb_takeover_disconnect_bt();
-        s_bt_new_conn_off_for_usb = true;
+    if (wired_mounted) {
+        if (!s_bt_new_conn_off_for_usb) {
+            bluepad32::wired_usb_takeover_disconnect_bt();
+            s_bt_new_conn_off_for_usb = true;
+        }
+    } else {
+        if (s_bt_new_conn_off_for_usb) {
+            bluepad32::wired_usb_release_enable_bt_pairing();
+            s_bt_new_conn_off_for_usb = false;
+        }
     }
 }
 
@@ -332,6 +300,31 @@ void pico_w::poll_usb_host_mux_from_core0() {
 }
 #endif // CONFIG_EN_USB_HOST
 
+#if defined(CONFIG_EN_USB_HOST)
+namespace board_api_usbh {
+
+/**
+ * Strong override of the weak empty stub in board_api_usbh.cpp.
+ * Mode switch (store_driver_type → disconnect_all → NVS write → reboot) must
+ * stop the 1 kHz SOF timer and halt Core1 (BTstack) before flash erase/program.
+ */
+void stop_pio_usb_host() {
+    OGXM_LOG("PicoW: stop_pio_usb_host (SOF stop + Core1 reset + tuh_deinit)\n");
+    pico_w_usb_sof_timer_stop();
+    multicore_reset_core1();
+    sleep_ms(50);
+    if (s_pio_usb_tuh_inited) {
+        (void)tuh_deinit(BOARD_TUH_RHPORT);
+        s_pio_usb_tuh_inited = false;
+    }
+    s_usb_line_debounce_armed = false;
+    s_usb_unplug_debounce_armed = false;
+    enable_host_line_irq_monitoring();
+}
+
+} // namespace board_api_usbh
+#endif
+
 #if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
 static DeviceDriver* s_gpio_device_driver = nullptr;
 static void gpio_device_process_cb(void* ctx) {
@@ -350,12 +343,11 @@ static void gpio_device_process_cb(void* ctx) {
         for (uint8_t i = 0; i < MAX_GAMEPADS; ++i) {
             s_gpio_device_driver->process(i, _gamepads[i]);
         }
-        bluepad32::process_pending_adaptive_triggers();
+        RadioBackend::process_adaptive_triggers();
     }
 }
-#endif // !CONFIG_OGXM_USB_DEVICE_ONLY
 
-#if defined(CONFIG_EN_USB_HOST) && !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
+#if defined(CONFIG_EN_USB_HOST)
 constexpr uint32_t FEEDBACK_DELAY_MS = 200;
 
 void core1_task_wii_usb_host() {
@@ -436,20 +428,10 @@ void core1_task_wii_usb_host() {
 }
 #endif
 
+#endif // !CONFIG_OGXM_USB_DEVICE_ONLY
+
 void core1_task() {
-    flash_safe_execute_core_init();
-    OGXM_LOG("PicoW Core1: entry\n");
-    board_api::init_bluetooth();
-    OGXM_LOG("PicoW Core1: init_bluetooth done\n");
-#if defined(CONFIG_OGXM_NETWORK)
-    if (s_network_mode) NetworkService::start();
-#endif
-    board_api::set_led(true);
-    OGXM_LOG("PicoW Core1: set_led(true) done\n");
-    BLEServer::init_server(_gamepads);
-    OGXM_LOG("PicoW Core1: BLEServer init done, entering run_task\n");
-    // Bluetooth and Wi-Fi share this core's serialized radio context.
-    bluepad32::run_task(_gamepads);
+    RadioBackend::run(_gamepads);
 }
 
 void set_gp_check_timer(uint32_t task_id) {
@@ -457,9 +439,7 @@ void set_gp_check_timer(uint32_t task_id) {
     UserSettings& user_settings = UserSettings::get_instance();
     TaskQueue::Core0::queue_delayed_task(task_id, UserSettings::GP_CHECK_DELAY_MS, true,
     [&user_settings] {
-#if defined(CONFIG_OGXM_NETWORK)
         if (FirmwareUpdate::active() || !RemoteControl::physical_output_enabled()) return;
-#endif
         //Check gamepad inputs for button combo to change usb device driver
         if (user_settings.check_for_driver_change(_gamepads[0])) {
             //This will store the new mode and reboot the pico
@@ -478,9 +458,7 @@ void pico_w::initialize() {
 
     UserSettings& user_settings = UserSettings::get_instance();
     user_settings.initialize_flash();
-#if defined(CONFIG_OGXM_NETWORK)
     DeviceServices::initialize();
-#endif
 #if defined(CONFIG_OGXM_DEBUG)
     OGXM_LOG("PicoW init: flash inited, driver=" + OGXM_TO_STRING(user_settings.get_current_driver()) + "\n");
 #else
@@ -493,77 +471,30 @@ void pico_w::initialize() {
 
     DeviceManager& device_manager = DeviceManager::get_instance();
     device_manager.initialize_driver(user_settings.get_current_driver(), _gamepads);
-#if defined(CONFIG_EN_USB_HOST)
-    #if defined(CONFIG_OGXM_USB_DEVICE_ONLY)
-    WiredHost::initialize(_gamepads);
-    #else
-    HostManager::get_instance().initialize(_gamepads);
-    #endif
-#endif
-#if defined(CONFIG_OGXM_NETWORK)
     RemoteControl::begin(_gamepads[0], user_settings.get_current_driver());
+#if defined(CONFIG_EN_USB_HOST)
+    HostManager::get_instance().initialize(_gamepads);
 #endif
     OGXM_LOG("PicoW init: driver inited\n");
 }
 
 void pico_w::run() {
-#if defined(CONFIG_OGXM_USB_DEVICE_ONLY)
-    // Native USB is the console/PC output. Optional GP9/GP10 PIO host
-    // is serviced from Core0; Core1 retains Bluetooth and Wi-Fi.
-    DeviceDriver* device_driver = DeviceManager::get_instance().get_driver();
-#if defined(CONFIG_OGXM_NETWORK)
-    s_network_mode = true;
-#endif
-    tud_init(BOARD_TUD_RHPORT);
-    TaskQueue::Core0::process_tasks();
-    multicore_reset_core1();
-    multicore_launch_core1(core1_task);
-    set_gp_check_timer(TaskQueue::Core0::get_new_task_id());
-
-    while (true) {
-        TaskQueue::Core0::process_tasks();
-#if defined(CONFIG_OGXM_NETWORK)
-        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-        DeviceServices::tick(now_ms, tud_mounted(), bluepad32::any_connected());
-        NetworkService::service_display_from_core0(now_ms);
-#endif
-        tud_task();
-#if defined(CONFIG_EN_USB_HOST)
-        WiredHost::poll();
-#endif
-        for (uint8_t i = 0; i < MAX_GAMEPADS; ++i) {
-#if defined(CONFIG_OGXM_NETWORK)
-            Gamepad& output = i == 0 ? RemoteControl::output_gamepad(_gamepads[i]) : _gamepads[i];
-            device_driver->process(i, output);
-            if (i == 0) RemoteControl::on_output_processed(output);
-#else
-            device_driver->process(i, _gamepads[i]);
-#endif
-        }
-        bluepad32::process_pending_adaptive_triggers();
-        // Keep Core0 cooperative even while no pad is connected. On Pico W,
-        // racing through this loop can starve Core1/CYW43 during Bluetooth
-        // discovery, the HID-ready handshake, and Wi-Fi coexistence.
-        // PIO-USB SOF timing is maintained by its dedicated 1 kHz timer.
-        // Match the upstream OGX-Mini 2026 pacing for stable Bluetooth.
-        sleep_ms(1);
-    }
-#else
     OGXM_LOG("PicoW run: start\n");
     multicore_reset_core1();
 
     UserSettings& user_settings = UserSettings::get_instance();
     DeviceDriver* device_driver = DeviceManager::get_instance().get_driver();
     DeviceDriverType current_driver = user_settings.get_current_driver();
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
     const bool wii_mode = (current_driver == DeviceDriverType::WII);
     const bool gpio_device_mode = (current_driver == DeviceDriverType::PS1PS2 || current_driver == DeviceDriverType::GAMECUBE || current_driver == DeviceDriverType::DREAMCAST);
-#if defined(CONFIG_OGXM_NETWORK)
-    // First remote release targets USB console outputs; the special GPIO/Wii
-    // modes retain their existing core scheduling and have no Wi-Fi service.
-    s_network_mode = !wii_mode && !gpio_device_mode && current_driver != DeviceDriverType::N64;
+#else
+    const bool wii_mode = false;
+    const bool gpio_device_mode = false;
 #endif
     OGXM_LOG("PicoW run: wii_mode=" + std::string(wii_mode ? "1" : "0") + " gpio_device_mode=" + std::string(gpio_device_mode ? "1" : "0") + "\n");
 
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
 #if defined(CONFIG_EN_USB_HOST)
     if (wii_mode) {
         OGXM_LOG("PicoW run: launching Core1 (Wii USB host)\n");
@@ -625,12 +556,15 @@ void pico_w::run() {
 #endif
             bluepad32::run_task(_gamepads);  /* never returns */
         }
-    } else {
+    } else
+#endif // !CONFIG_OGXM_USB_DEVICE_ONLY
+    {
         tud_init(BOARD_TUD_RHPORT);
         OGXM_LOG("PicoW run: tud_init done, launching Core1 (BT)\n");
         multicore_launch_core1(core1_task);
         OGXM_LOG("PicoW run: Core1 (BT) launched\n");
 
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
         HostInputSource input_src = user_settings.get_input_source();
         if (input_src == HostInputSource::PSX_GPIO) {
             GPIOHost::psx_host_init(0, 20, 19);
@@ -641,6 +575,7 @@ void pico_w::run() {
         } else if (input_src == HostInputSource::N64_GPIO) {
             GPIOHost::n64_host_init(0, 19);
         }
+#endif
     }
 
     uint32_t tid_gp_check = TaskQueue::Core0::get_new_task_id();
@@ -651,6 +586,7 @@ void pico_w::run() {
     static uint32_t loop_count = 0;
     const bool ps2_poll_mode = gpio_device_mode && (current_driver == DeviceDriverType::PS1PS2);
     while (true) {
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
         /* PS2 first: drain before any other work so we respond within byte time (reduces OPL pad-init hang). */
         if (ps2_poll_mode) {
             while (psx_device_poll() != 0)
@@ -661,31 +597,15 @@ void pico_w::run() {
             while (psx_device_poll() != 0)
                 ;
         }
+#endif
         TaskQueue::Core0::process_tasks();
-#if defined(CONFIG_OGXM_NETWORK)
-        if (s_network_mode) {
-            const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-            RemoteControl::tick(now_ms);
-            NetworkService::service_display_from_core0(now_ms);
-#if defined(CONFIG_EN_USB_HOST)
-            const bool wired = HostManager::get_instance().any_mounted();
-#else
-            const bool wired = false;
-#endif
-            NetworkService::note_runtime(tud_mounted(), bluepad32::any_connected(),
-                                        wired);
-            if (NetworkService::take_save_acknowledged()) RemoteControl::commit_after_response();
-        }
-        const bool pause_physical = s_network_mode && RemoteControl::profile_apply_pending();
-#else
-        const bool pause_physical = false;
-#endif
         if (!wii_mode) {
             tud_task();
+            DeviceServices::tick(to_ms_since_boot(get_absolute_time()), tud_mounted(),
+                                 RadioBackend::bluetooth_connected());
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
             HostInputSource input_src = UserSettings::get_instance().get_input_source();
-            if (pause_physical) {
-                // The radio loop owns the short profile swap handshake.
-            } else if (input_src == HostInputSource::PSX_GPIO) {
+            if (input_src == HostInputSource::PSX_GPIO) {
                 GPIOHost::psx_host_poll(_gamepads[0]);
             } else if (input_src == HostInputSource::GAMECUBE_GPIO && UserSettings::get_instance().get_current_driver() != DeviceDriverType::GAMECUBE) {
                 GPIOHost::joybus_host_poll(_gamepads[0]);
@@ -694,24 +614,23 @@ void pico_w::run() {
             } else if (input_src == HostInputSource::N64_GPIO) {
                 GPIOHost::n64_host_poll(_gamepads[0]);
             }
+#endif
         }
+#if !defined(CONFIG_OGXM_USB_DEVICE_ONLY)
         if (ps2_poll_mode) {
             while (psx_device_poll() != 0)
                 ;
             if (loop_count != 0 && (loop_count % 10000u) == 0)
                 OGXM_LOG("PicoW run: main loop psx_device_poll tick " + std::to_string(loop_count) + "\n");
         }
-        for (uint8_t i = 0; i < MAX_GAMEPADS; ++i) {
-#if defined(CONFIG_OGXM_NETWORK)
-            Gamepad& output = (s_network_mode && i == 0)
-                ? RemoteControl::output_gamepad(_gamepads[i]) : _gamepads[i];
-            device_driver->process(i, output);
-            if (s_network_mode && i == 0) RemoteControl::on_output_processed(output);
-#else
-            device_driver->process(i, _gamepads[i]);
 #endif
+        for (uint8_t i = 0; i < MAX_GAMEPADS; ++i) {
+            Gamepad& output = i == 0 ? RemoteControl::output_gamepad(_gamepads[i]) : _gamepads[i];
+            device_driver->process(i, output);
+            if (i == 0) RemoteControl::on_output_processed(output);
         }
-        bluepad32::process_pending_adaptive_triggers();
+        RadioBackend::process_adaptive_triggers();
+        NetworkService::service_display_from_core0(to_ms_since_boot(get_absolute_time()));
 #if defined(CONFIG_EN_USB_HOST)
         InputSlot::poll_perf_log();
 #endif
@@ -727,34 +646,23 @@ void pico_w::run() {
         /* Run USB host mux after all heavy work (device_driver->process, etc.) so pio_usb_host_frame
          * catch-up covers the whole iteration; otherwise SOFs can lag for tens of ms and wired input dies. */
 #if defined(CONFIG_EN_USB_HOST)
-        if (!wii_mode && !pause_physical) {
+        if (!wii_mode) {
             pico_w::poll_usb_host_mux_from_core0();
         }
 #endif
-        /* Main-loop yield (#54 / wired host):
-         * - sleep_ms(1) while tud_mounted() starves OG Xbox Duke USB → MC3 / Half-Life slowdown.
-         * - While USB device configured: never sleep_ms(1). BT pad connected → sleep_us(250) so
-         *   Core1/CYW43 still run; unpaired → tight_loop_contents().
-         * - Wired PIO host pad mounted: short sleep_us so tuh_task keeps up under BT load.
-         * - USB not configured: sleep_ms(1) OK (pairing / idle). */
+        /* With hardware SOF timer, Core0 can sleep briefly; wired USB still needs tuh_task often.
+         * sleep_ms(1) alone starved TinyUSB vs Wii Core1's tight loop. */
         if (!ps2_poll_mode) {
 #if defined(CONFIG_EN_USB_HOST)
             if (!wii_mode && s_pio_usb_tuh_inited && HostManager::get_instance().any_mounted()) {
                 sleep_us(400);
             } else
 #endif
-            if (!wii_mode && tud_mounted()) {
-                if (bluepad32::any_connected()) {
-                    sleep_us(250);
-                } else {
-                    tight_loop_contents();
-                }
-            } else {
+            {
                 sleep_ms(1);
             }
         }
     }
-#endif // CONFIG_OGXM_USB_DEVICE_ONLY
 }
 
 // #else // OGXM_BOARD_USES_PICO_W_FIRMWARE

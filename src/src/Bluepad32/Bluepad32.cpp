@@ -1372,6 +1372,11 @@ static void oob_event_cb(uni_platform_oob_event_t event, void* data) {
 static void controller_data_cb(uni_hid_device_t* device, uni_controller_t* controller) {
     s_diag_callbacks.fetch_add(1, std::memory_order_relaxed);
     if (!remote_bt_allowed()) return;
+#if defined(CONFIG_OGXM_NETWORK)
+    // The radio acknowledges between callbacks. Preserve the last published
+    // state while Core0 commits the shared profile; USB service keeps running.
+    if (RemoteControl::profile_apply_pending()) return;
+#endif
     static uni_gamepad_t prev_uni_gp[MAX_GAMEPADS] = {};
 
     if (controller->klass != UNI_CONTROLLER_CLASS_GAMEPAD){
@@ -1870,15 +1875,9 @@ void run_task(Gamepad(&gamepads)[MAX_GAMEPADS])
         uni_bt_enable_new_connections_safe(false);
         OGXM_LOG("BT: applied deferred USB quiet (pad was plugged during BT bring-up)\n");
     }
-    /* Upstream OGX-Mini-2026 PR #146: BTstack timer wakeups can be lost in the
-     * CYW43 threadsafe-background async context. Re-trigger its low-priority
-     * service IRQ every 2 ms so HOGP timers continue even when hardware alarm
-     * re-arming fails. Keep this at the very end of run_task() on Core1.
-     * This does not change Wi-Fi, pairing, profiles, or controller parsers. */
-    while (true) {
-        btstack_run_loop_poll_data_sources_from_irq();
-        busy_wait_us(2000);
-    }
+    // Native 2026 BTstack run loop. SDK 2.3.0 already includes the timer fixes
+    // used by develop; NetworkService remains on its serialized radio hook.
+    btstack_run_loop_execute();
 }
 
 } // namespace bluepad32

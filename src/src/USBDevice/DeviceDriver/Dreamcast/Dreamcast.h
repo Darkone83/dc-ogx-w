@@ -1,5 +1,5 @@
 /* Dreamcast Maple Bus output (device) – stub until DreamPicoPort Maple Bus HAL is ported.
- * Upstream port notes: OGX-Mini-2026/Firmware/RP2040/docs/Dreamcast_Port.md; based on https://github.com/OrangeFox86/DreamPicoPort */
+ * See Firmware/RP2040/docs/Dreamcast_Port.md for port steps from https://github.com/OrangeFox86/DreamPicoPort */
 
 #ifndef _D_DREAMCAST_DRIVER_H_
 #define _D_DREAMCAST_DRIVER_H_

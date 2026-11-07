@@ -30,7 +30,8 @@ void tick(std::uint32_t now_ms, bool usb_configured, bool bluetooth_connected) {
     RemoteControl::set_maintenance(FirmwareUpdate::active());
     RemoteControl::tick(now_ms);
     FirmwareUpdate::tick(now_ms);
-    NetworkService::note_runtime(usb_configured, bluetooth_connected, false, RemoteControl::session_active());
+    NetworkService::note_runtime(usb_configured, bluetooth_connected,
+                                board_api::usb::host_any_pad_mounted(), RemoteControl::session_active());
 
     NetworkService::Completion completion;
     if (deferred == NetworkService::SaveAction::None && NetworkService::take_completion(completion)) {
@@ -88,7 +89,7 @@ void tick(std::uint32_t now_ms, bool usb_configured, bool bluetooth_connected) {
     led.update_error = FirmwareUpdate::failed();
     led.profile_id = RemoteControl::applied_profile_id();
     StatusLed::tick(now_ms, led);
-    // Atomics only; OLED I2C traffic is handled by the radio core.
+    // Publish atomics here; the shared Core0 display service performs I2C work.
     OledDisplay::publish_controller(usb_configured, RemoteControl::session_active(),
         RemoteControl::input_fresh(), RemoteControl::applied_profile_id(),
         static_cast<std::uint8_t>(UserSettings::get_instance().get_current_driver()));

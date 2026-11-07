@@ -6,23 +6,21 @@
 #include "OGXMini/Board/ESP32_Bluepad32_I2C.h"
 #include "OGXMini/OGXMini.h"
 
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-#include "OGXMini/Board/PicoW2023.h"
+#if defined(CONFIG_EN_USB_HOST)
+#include "Board/StatusLed.h"
+#endif
 
-namespace OGXMini {
-void initialize() { pico_w_2023::initialize(); }
-void run() { pico_w_2023::run(); }
-void host_mounted(bool, HostDriverType) {}
-void host_mounted(bool) {}
-void wireless_connected(bool, uint8_t) {}
-} // namespace OGXMini
-
-#elif defined(CONFIG_OGXM_USB_DEVICE_ONLY) && defined(OGXM_BOARD_USES_PICO_W_FIRMWARE)
+#if defined(CONFIG_OGXM_USB_DEVICE_ONLY) && defined(OGXM_BOARD_USES_PICO_W_FIRMWARE)
 namespace OGXMini {
 void initialize() { pico_w::initialize(); }
 void run() { pico_w::run(); }
-void host_mounted(bool, HostDriverType) {}
-void host_mounted(bool) {}
+void host_mounted(bool mounted, HostDriverType) { host_mounted(mounted); }
+void host_mounted(bool mounted) {
+#if defined(CONFIG_EN_USB_HOST)
+    if (mounted) StatusLed::show_usb_phase(StatusLed::Phase::UsbMounted);
+    else StatusLed::clear_usb_phase();
+#endif
+}
 void wireless_connected(bool, uint8_t) {}
 } // namespace OGXMini
 

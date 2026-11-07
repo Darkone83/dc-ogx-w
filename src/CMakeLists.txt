@@ -117,6 +117,31 @@ add_executable(dc-ogx-w
     lib/libxsm3/excrypt_sha.c
 )
 
+# Keep Curr5's size optimization for every non-USB component. Only the
+# selected USB host, TinyUSB/PIO stack and their existing Core0 integration
+# use the uploaded reference's Release speed options; source bodies and radio
+# dependency options remain unchanged. No compile-LTO option is introduced.
+if(DC_OGX_USB_HOST_ENABLED AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    set(_dc_usb_timing_sources
+        src/OGXMini/Board/PicoW.cpp
+        src/TaskQueue/TaskQueue.cpp
+        src/Board/board_api_private/board_api_usbh.cpp
+        src/USBHost/tuh_callbacks.cpp
+        src/USBHost/HostDriver/SwitchPro/SwitchPro.cpp
+        src/USBHost/HostDriver/PS5/PS5.cpp
+        src/USBHost/HostDriver/PS4/PS4.cpp
+        src/USBHost/HostDriver/XInput/XboxOne.cpp
+        src/USBHost/HostDriver/XInput/tuh_xinput/tuh_xinput.cpp
+    )
+    file(GLOB_RECURSE _dc_usb_stack_sources CONFIGURE_DEPENDS
+        "${PICO_TINYUSB_PATH}/src/*.c" "${PICO_PIO_USB_PATH}/src/*.c")
+    list(APPEND _dc_usb_timing_sources ${_dc_usb_stack_sources})
+    set_property(SOURCE ${_dc_usb_timing_sources} APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<CONFIG:Release>:-O3>"
+        "$<$<CONFIG:Release>:-fomit-frame-pointer>"
+        "$<$<CONFIG:Release>:-finline-functions>")
+endif()
+
 target_include_directories(dc-ogx-w PRIVATE
     "${DC_OGX_SRC}"
     "${DC_OGX_SRC}/NetworkService"

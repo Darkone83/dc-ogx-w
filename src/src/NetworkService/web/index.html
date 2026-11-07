@@ -947,14 +947,6 @@
       .bt-debug-details summary:focus-visible { outline:2px solid var(--green); outline-offset:2px; }
       .bt-debug-details .facts { margin-top:11px; }
       .bt-debug-details .device-copy { margin:7px 0 10px; }
-      .bt-protocol-details { margin:12px 0 6px; padding:9px 11px; border:1px solid var(--line);
-        border-radius:9px; background:var(--control-bg); }
-      .bt-protocol-details summary { padding:5px 2px; }
-      .bt-protocol-details .facts { margin-top:10px; }
-      @media (max-width:760px) {
-        body.nav-open { overflow:hidden; }
-        nav.app-nav { overscroll-behavior:contain; }
-      }
       @media (max-width:520px) {
         .bt-summary { display:grid; gap:5px; }
         .bt-summary .bt-summary-reports { margin-left:0; }
@@ -1131,7 +1123,7 @@
           <div id="input-mode-card" class="card" hidden style="margin-bottom:18px">
             <h2>Controller connection</h2>
             <div class="settings-actions">
-              <label>Input mode <select id="input-mode"><option value="physical">Bluetooth controller</option>
+              <label>Input mode <select id="input-mode"><option value="physical">Physical controller (USB / Bluetooth)</option>
                 <option value="wifi">Wi-Fi remote control</option><option value="configure">Configuration</option></select></label>
               <button id="apply-input-mode">Change mode</button>
             </div>
@@ -1282,7 +1274,7 @@
           <p class="note">Loading replaces the editor and uses that saved profile for this session. Save it to keep the selection after restart.</p>
           <p class="active-profile"><span class="colour-swatch" id="profile-active-colour" aria-hidden="true"></span>
             <span id="profile-active-name">Waiting for the active profile…</span></p>
-          <p class="source-notice" data-config-gate hidden>Switch to Configuration to change a Bluetooth profile.
+          <p class="source-notice" data-config-gate hidden>Switch to Configuration to change a controller profile.
             <button data-set-mode="configure">Enter configuration</button></p>
           <section class="card live-tuning" id="live-tuning" aria-labelledby="tuning-title">
             <div class="card-head"><div><h2 id="tuning-title">Live response preview</h2>
@@ -1413,7 +1405,7 @@
                 <label>Password<input id="wifi-password" type="password" maxlength="64" autocomplete="new-password"
                   placeholder="Leave blank to keep the saved password" /></label>
                 <label class="check"><input id="wifi-open" type="checkbox" />This network has no password</label>
-                <label>Local name<input id="wifi-hostname" type="text" value="dcogxw" maxlength="32"
+                <label>Local name<input id="wifi-hostname" type="text" value="dc-ogx-w" maxlength="32"
                   pattern="[A-Za-z0-9](?:[A-Za-z0-9\-]{0,30}[A-Za-z0-9])?" autocomplete="off" required /></label>
                 <div class="settings-actions">
                   <button class="primary" id="wifi-save" type="submit" disabled>Save and join</button>
@@ -1445,7 +1437,7 @@
               <p class="device-copy" id="wifi-mdns-message" role="status"></p>
               <p class="device-copy" id="wifi-connection-message" role="status" aria-live="polite">The recovery access point stays available if joining your network fails.</p>
               <p class="note">After joining, connect your PC to the same network. Open the network address above,
-                or use the local name when name discovery is available on home Wi-Fi. The recovery access point uses 192.168.4.1. Client isolation on a guest network can prevent access.</p>
+                or use the local name when name discovery is available. Client isolation on a guest network can prevent access.</p>
             </div>
           </div>
         </section>
@@ -1588,7 +1580,7 @@
               <span class="bt-summary-reports" id="bt-diag-reports">—</span>
             </div>
             <details id="bt-diag-details" class="bt-debug-details">
-              <summary>Troubleshooting details <span>Pairing history and Bluetooth diagnostics</span></summary>
+              <summary>Technical diagnostics <span>Pairing, HID and GATT details</span></summary>
               <p class="device-copy">Read-only Bluetooth details since the last adapter restart.</p>
               <dl class="facts">
                 <div><dt>Transport / slot</dt><dd id="bt-diag-transport">—</dd></div>
@@ -1596,18 +1588,13 @@
                 <div><dt>Last event</dt><dd id="bt-diag-event">—</dd></div>
                 <div><dt>Last failure</dt><dd id="bt-diag-failure">—</dd></div>
                 <div><dt>Disconnect reason</dt><dd id="bt-diag-disconnect">—</dd></div>
+                <div><dt>BLE HIDS setup</dt><dd id="bt-diag-hids-setup">—</dd></div>
+                <div><dt>HID subscriptions</dt><dd id="bt-diag-cccd">—</dd></div>
+                <div><dt>Input source</dt><dd id="bt-diag-origin">—</dd></div>
+                <div><dt>Raw GATT notifications</dt><dd id="bt-diag-raw">—</dd></div>
+                <div><dt>Exit Suspend</dt><dd id="bt-diag-exit">—</dd></div>
+                <div><dt>GET-report requests</dt><dd id="bt-diag-get">—</dd></div>
               </dl>
-              <details class="bt-protocol-details">
-                <summary>BLE protocol counters <span>HIDS, GATT and report transactions</span></summary>
-                <dl class="facts">
-                  <div><dt>BLE HIDS setup</dt><dd id="bt-diag-hids-setup">—</dd></div>
-                  <div><dt>HID subscriptions</dt><dd id="bt-diag-cccd">—</dd></div>
-                  <div><dt>Input source</dt><dd id="bt-diag-origin">—</dd></div>
-                  <div><dt>Raw GATT notifications</dt><dd id="bt-diag-raw">—</dd></div>
-                  <div><dt>Exit Suspend</dt><dd id="bt-diag-exit">—</dd></div>
-                  <div><dt>GET-report requests</dt><dd id="bt-diag-get">—</dd></div>
-                </dl>
-              </details>
               <p class="device-copy" id="bt-diag-note" role="status" aria-live="off">Monitoring Bluetooth callbacks…</p>
             </details>
           </div>
@@ -1690,13 +1677,6 @@
     <script>
       "use strict";
       const $ = (id) => document.getElementById(id);
-      // Repeated telemetry snapshots usually contain unchanged values. Avoid
-      // rewriting live regions and invalidating text layout unnecessarily.
-      function setText(id, value) {
-        const node = $(id);
-        if (node && node.textContent !== value) node.textContent = value;
-      }
-
       // Appearance is a per-browser preference, never an adapter setting.
       // Local storage may be disabled in private browsing; work regardless.
       const validThemes = new Set(["darkone", "theia-dark", "midnight", "synthwave", "ember", "terminal", "theia-light", "arctic-light"]);
@@ -1908,7 +1888,7 @@
       let controlWanted = false, reconnectTimer = null, reconnectAttempts = 0,
         controlEpoch = 0, recovering = false, gamepadNeedsNeutral = true,
         lastPingAt = 0, pingId = 0, pingSupported = false,
-        bluetoothSupported = null, inputMode = "wifi", modePending = false, modeBusy = false, modeSelectionDirty = false,
+        bluetoothSupported = null, physicalSupported = null, inputMode = "physical", modePending = false, modeBusy = false, modeSelectionDirty = false,
         calibration = null, calibrationBusy = false, calibrationTimer = null;
       let maintenanceBusy = false, remoteMaintenance = false, deviceLoaded = false,
         deviceLoading = false, updateActionBusy = false, updateToken = null,
@@ -1946,46 +1926,16 @@
         $("remapping-message").className = $("profile-message").className;
         if (activeTab === "calibration") deviceMessage("calibration-message", text, error);
       }
-      // One WebUI for both network backends. Until /api/status identifies the
-      // transport, use the clone-safe single-request policy. ESP-AT shares one
-      // command stream and must remain strictly serialized. Native CYW43 can
-      // overlap bounded GETs, but writes and reads must not cross each other:
-      // updates, configuration and control leases must retain request ordering.
-      let apiTransport = "serialized";
+      // The ESP radio shares a small pool of HTTP connections and one command
+      // stream. Keep this page's reads and writes in order; WebSocket input is
+      // independent. A timeout starts when a request actually reaches the wire.
+      let apiQueue = Promise.resolve();
       let queuedApiRequests = 0;
-      let activeApiRequests = 0;
-      let apiExclusiveActive = false;
-      const apiPending = [];
-      const API_NATIVE_READ_LIMIT = 2;
-      function setApiTransport(transport) {
-        const next = transport === "cyw43" ? "native" : "serialized";
-        if (apiTransport !== next) {
-          apiTransport = next;
-          drainApiQueue();
-        }
-      }
-      function drainApiQueue() {
-        const limit = apiTransport === "native" ? API_NATIVE_READ_LIMIT : 1;
-        while (apiPending.length && activeApiRequests < limit && !apiExclusiveActive) {
-          const entry = apiPending[0];
-          // Writes are a barrier; do not dispatch a later GET ahead of one.
-          if (entry.exclusive && activeApiRequests !== 0) return;
-          apiPending.shift();
-          ++activeApiRequests;
-          if (entry.exclusive) apiExclusiveActive = true;
-          Promise.resolve().then(entry.request).then(entry.resolve, entry.reject).finally(() => {
-            --activeApiRequests;
-            --queuedApiRequests;
-            if (entry.exclusive) apiExclusiveActive = false;
-            drainApiQueue();
-          });
-          if (entry.exclusive) return;
-        }
-      }
       function api(path, body, timeoutMs = 7000, stillNeeded = null) {
         const requestBody = body === undefined ? undefined : JSON.stringify(body);
-        // Only a definite 503 service_busy is safe to replay: a timeout or
-        // lost response must never blindly repeat a state-changing request.
+        // Only a definite 503 service_busy is safe to replay: the firmware
+        // promises that no control lease was created in that case. A lost
+        // response, timeout or control conflict must never be retried blindly.
         const acquireRequest = path === "/api/control/acquire" && requestBody !== undefined;
         const busyRetryLimit = acquireRequest ? 8 : 3;
         const request = async () => {
@@ -2014,24 +1964,31 @@
               }
               return result;
             } catch (error) {
+              // service_busy explicitly rejects the operation before it is
+              // accepted. Never blindly repeat an ambiguous POST/network error.
               if (error.status !== 503 ||
                   !["service_busy", "led_busy"].includes(error.code) || attempt >= busyRetryLimit) throw error;
             } finally { clearTimeout(timer); }
+            // Space out retries; don't hammer the ESP command queue while the
+            // other core services USB. A cancelled Take control stops before
+            // its next request, even if one was already queued by the page.
             const delay = acquireRequest ? Math.min(400, 100 * (attempt + 1)) : 100 * (attempt + 1);
             await new Promise((resolve) => setTimeout(resolve, delay));
           }
         };
+        // Background telemetry must never repeatedly jump ahead of user-initiated
+        // profile, Wi-Fi, or LED operations on the ESP's one-command AT link.
         ++queuedApiRequests;
-        return new Promise((resolve, reject) => {
-          apiPending.push({ request, resolve, reject, exclusive: requestBody !== undefined });
-          drainApiQueue();
-        });
+        const pending = apiQueue.then(request);
+        apiQueue = pending.catch(() => {});
+        void pending.then(() => { --queuedApiRequests; }, () => { --queuedApiRequests; });
+        return pending;
       }
       function setButtons() {
         const active = token !== null;
         $("acquire").disabled = !online || active || controlWanted || connecting || releasing || recovering ||
           maintenanceBusy || remoteMaintenance || wifiScanBusy || modeBusy || modePending ||
-          (bluetoothSupported === true && inputMode !== "wifi");
+          (physicalSupported === true && inputMode !== "wifi");
         $("release").disabled = !active && !controlWanted && !connecting && !recovering;
         $("source").disabled = active || controlWanted;
         $("gamepad-select").disabled = active || controlWanted;
@@ -2121,7 +2078,7 @@
         // DOM click events are not a request to resume a previous session.
         resuming = resuming === true;
         if (connecting || token !== null || recovering || releasing || maintenanceBusy || remoteMaintenance ||
-            modePending || modeBusy || (bluetoothSupported === true && inputMode !== "wifi")) return;
+            modePending || modeBusy || (physicalSupported === true && inputMode !== "wifi")) return;
         if (resuming && !canReconnect()) return;
         if ($( "source").value === "gamepad" && selectedGamepad === null) {
           stopReconnect();
@@ -2428,9 +2385,10 @@
         let pads = [];
         try { if (typeof navigator.getGamepads === "function") pads = [...navigator.getGamepads()]; } catch (_) {}
         const pad = pads.find(p => p && p.connected && p.mapping === "standard");
-        setText("tuning-source", pad ? "Live · " + pad.id.slice(0, 33) : "No PC controller detected");
-        setText("tuning-hint", pad ? "Live browser Gamepad input · no network polling" :
-          "Connect a PC gamepad to this browser for live stick and trigger feedback.");
+        const chip = $("tuning-source");
+        chip.textContent = pad ? "Live · " + pad.id.slice(0, 33) : "No PC controller detected";
+        $("tuning-hint").textContent = pad ? "Live browser Gamepad input · no network polling" :
+          "Connect a PC gamepad to this browser for live stick and trigger feedback.";
         const ax = pad?.axes || [];
         for (const [side, group, xi, yi] of [["left","joystick_settings_l",0,1],["right","joystick_settings_r",2,3]]) {
           paintStick($("tuning-"+side), clamp(Number(ax[xi])||0,-1,1), clamp(Number(ax[yi])||0,-1,1),
@@ -2637,11 +2595,7 @@
         navShade.hidden = !open;
       }
       navToggle.addEventListener("click", () => showNavigation(!document.body.classList.contains("nav-open")));
-      navShade.addEventListener("click", () => { showNavigation(false); navToggle.focus(); });
-      // On large screens navigation is a persistent sidebar, not a modal drawer.
-      window.matchMedia("(min-width: 761px)").addEventListener("change", event => {
-        if (event.matches) showNavigation(false);
-      });
+      navShade.addEventListener("click", () => showNavigation(false));
       document.addEventListener("keydown", e => { if (e.key === "Escape" && document.body.classList.contains("nav-open")) showNavigation(false); });
       document.querySelectorAll("[data-tab]").forEach((button) =>
         button.addEventListener("click", () => {
@@ -2669,42 +2623,37 @@
         }),
       );
 
-      // Static controls are not recreated after initial page load. Reuse these
-      // groups during periodic status/button refreshes; keep dynamic lists live.
-      const configGateElements = document.querySelectorAll("[data-config-gate]");
-      const setModeElements = document.querySelectorAll("[data-set-mode]");
-      const calibrationMaskInputs = $("calibration-mask").querySelectorAll("input");
-      const ledFormInputs = $("panel-led").querySelectorAll("input,select");
-      const ledProfileButtons = $("led-profile-colours").querySelectorAll("button");
-      const ledDiagnosticButtons = $("led-diagnostic-colours").querySelectorAll("button");
-      const oledFormInputs = $("oled-form").querySelectorAll("input,select");
       function renderInputMode(state = lastStatus?.control || {}) {
         const supported = state.bluetooth_supported ?? lastStatus?.network?.bluetooth_available;
+        const physical = state.physical_supported ?? lastStatus?.control?.physical_supported ?? supported;
         const wasBluetooth = bluetoothSupported;
+        const wasPhysical = physicalSupported;
+        if (typeof physical === "boolean") physicalSupported = physical;
         if (typeof supported === "boolean") bluetoothSupported = supported;
         if (["physical", "wifi", "configure"].includes(state.mode)) inputMode = state.mode;
         if (lastStatus && state.mode) lastStatus.control = { ...lastStatus.control, ...state };
         modePending = Boolean(state.mode_pending);
-        $("input-mode-card").hidden = bluetoothSupported !== true;
-        for (const name of ["calibration", "remapping"]) $("tab-" + name).hidden = bluetoothSupported !== true;
+        $("input-mode-card").hidden = physicalSupported !== true;
+        $("tab-calibration").hidden = bluetoothSupported !== true;
+        $("tab-remapping").hidden = physicalSupported !== true;
         $("open-hardware-calibration").hidden = bluetoothSupported !== true;
         if (!modeSelectionDirty || modeBusy || modePending) $("input-mode").value = state.requested_mode || inputMode;
         $("input-mode").disabled = modeBusy || modePending || maintenanceBusy || remoteMaintenance;
         $("apply-input-mode").disabled = $("input-mode").disabled;
-        $("source-policy").textContent = bluetoothSupported === true
-          ? "Choose Bluetooth, Wi-Fi remote control, or Configuration explicitly. Release leaves USB input neutral in Wi-Fi mode."
+        $("source-policy").textContent = physicalSupported === true
+          ? "Choose Physical controller, Wi-Fi remote control, or Configuration. Releasing Wi-Fi control leaves console input neutral."
           : "Wi-Fi control remains available. Temporary connection loss sends neutral input and reconnects your session.";
         $("input-mode-message").textContent = modePending ? "Changing input mode; USB output is neutral…"
-          : inputMode === "physical" ? "Bluetooth controller drives USB. Select Wi-Fi mode before taking remote control."
-          : inputMode === "configure" ? "Configuration: Bluetooth is available for calibration; USB output is neutral."
-          : "Wi-Fi mode: remote input drives USB; Bluetooth is disconnected.";
-        configGateElements.forEach((el) =>
-          (el.hidden = bluetoothSupported !== true || (inputMode === "configure" && !modePending)));
-        setModeElements.forEach((el) =>
+          : inputMode === "physical" ? "The physical controller drives console USB. Select Wi-Fi mode before taking remote control."
+          : inputMode === "configure" ? "Configuration: console USB output is neutral while you edit settings."
+          : "Wi-Fi mode: remote input drives console USB; physical controller input is paused.";
+        document.querySelectorAll("[data-config-gate]").forEach((el) =>
+          (el.hidden = physicalSupported !== true || (inputMode === "configure" && !modePending)));
+        document.querySelectorAll("[data-set-mode]").forEach((el) =>
           (el.disabled = modeBusy || modePending || maintenanceBusy || remoteMaintenance));
-        if (controlWanted && bluetoothSupported === true && (inputMode !== "wifi" || modePending))
+        if (controlWanted && physicalSupported === true && (inputMode !== "wifi" || modePending))
           void releaseControl("Input mode changed. Remote control released.");
-        if (profile && wasBluetooth !== bluetoothSupported) moveRemapping();
+        if (profile && (wasBluetooth !== bluetoothSupported || wasPhysical !== physicalSupported)) moveRemapping();
         setButtons();
         updateProfileButtons();
         renderCalibrationButtons();
@@ -2741,13 +2690,13 @@
           modeBusy = false;
           // Retain the latest direct mode response until the next status poll.
           $("input-mode").disabled = $("apply-input-mode").disabled = modePending || maintenanceBusy || remoteMaintenance;
-          setModeElements.forEach((el) => (el.disabled = modePending || maintenanceBusy || remoteMaintenance));
+          document.querySelectorAll("[data-set-mode]").forEach((el) => (el.disabled = modePending || maintenanceBusy || remoteMaintenance));
           setButtons(); updateProfileButtons(); renderCalibrationButtons(); deviceButtons();
         }
       }
       $("apply-input-mode").addEventListener("click", () => changeInputMode($("input-mode").value));
       $("input-mode").addEventListener("change", () => { modeSelectionDirty = true; });
-      setModeElements.forEach((el) =>
+      document.querySelectorAll("[data-set-mode]").forEach((el) =>
         el.addEventListener("click", () => changeInputMode(el.dataset.setMode)));
 
       function renderCalibrationButtons() {
@@ -2762,18 +2711,21 @@
         $("calibration-save").disabled = blocked || inputMode !== "configure" || phase !== "idle" || !profileDirty;
         $("calibration-save-mode").hidden = !profileDirty || inputMode !== "physical";
         $("calibration-save-mode").disabled = modePending || modeBusy || maintenanceBusy || remoteMaintenance;
-        calibrationMaskInputs.forEach((el) => (el.disabled = blocked || phase !== "idle"));
+        $("calibration-mask").querySelectorAll("input").forEach((el) => (el.disabled = blocked || phase !== "idle"));
       }
       // Adapter-side calibration feedback: same canvas layout as the PC gamepad
       // preview, but use the Pico's actual raw Bluetooth samples, not navigator.getGamepads().
       // The firmware owns calibration and Xbox output; this is read-only rendering.
       const calibrationAxis = (v) => clamp((Number(v) || 0) / ((Number(v) || 0) < 0 ? 32768 : 32767), -1, 1);
-      function paintCalibrationStick(side, range, phase, fresh, position, colors) {
+      function paintCalibrationStick(side, raw, range, phase, fresh, position) {
         const canvas = $("calibration-live-" + side);
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
         const size = canvas.width, c = size / 2, radius = c - 15;
-        const { muted, accent, travel } = colors;
+        const style = getComputedStyle(document.documentElement);
+        const muted = style.getPropertyValue("--muted").trim() || "#aaa";
+        const accent = style.getPropertyValue("--teal").trim() || "#5ca";
+        const travel = style.getPropertyValue("--green").trim() || "#8c8";
         const xKey = side === "left" ? "lx" : "rx", yKey = side === "left" ? "ly" : "ry";
         const x = calibrationAxis(position?.[xKey]), y = -calibrationAxis(position?.[yKey]);
         const xRange = range?.axes?.[xKey], yRange = range?.axes?.[yKey];
@@ -2806,6 +2758,9 @@
           ctx.beginPath(); ctx.arc(c + x * radius, c + y * radius, 5.5, 0, Math.PI * 2);
           ctx.fill(); ctx.stroke();
         }
+        const out = $("calibration-live-" + side + "-values");
+        out.textContent = fresh ? "Raw X " + Math.round(Number(raw[xKey]) || 0) + " · Y " +
+          Math.round(Number(raw[yKey]) || 0) : "Waiting for fresh input";
       }
       // The adapter returns independent controller samples over HTTP at ~250 ms intervals.
       // Blend only their presentation in the existing animation loop. Never interpolate
@@ -2814,7 +2769,6 @@
         values: { lx:0, ly:0, rx:0, ry:0, lt:0, rt:0 },
         targets: { lx:0, ly:0, rx:0, ry:0, lt:0, rt:0 },
         initialized:false, receivedAt:0, previousFrame:0, lastDraw:0, roundTripMs:null,
-        lastFresh:null, lastTheme:"",
       };
       const reducedCalibrationMotion = window.matchMedia &&
         window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -2836,9 +2790,8 @@
       }
       function animateCalibration(t) {
         if (activeTab !== "calibration" || document.hidden) return;
-        // 30 fps is sufficient for ~4 Hz snapshots, with less canvas/DOM work.
-        // This only changes presentation, not controller input or calibration data.
-        if (t - calibrationMotion.lastDraw < 33) return;
+        // Rendering is local and capped at 60 fps; no additional HTTP requests.
+        if (t - calibrationMotion.lastDraw < 16) return;
         const dt = calibrationMotion.previousFrame ? Math.min(80, Math.max(1, t - calibrationMotion.previousFrame)) : 16;
         calibrationMotion.previousFrame = t;
         calibrationMotion.lastDraw = t;
@@ -2853,14 +2806,8 @@
         }
         const phase = calibration?.phase || "idle";
         const range = phase === "idle" ? calibration?.calibration : calibration?.draft;
-        const style = getComputedStyle(document.documentElement);
-        const colors = {
-          muted: style.getPropertyValue("--muted").trim() || "#aaa",
-          accent: style.getPropertyValue("--teal").trim() || "#5ca",
-          travel: style.getPropertyValue("--green").trim() || "#8c8",
-        };
-        paintCalibrationStick("left", range, phase, fresh, calibrationMotion.values, colors);
-        paintCalibrationStick("right", range, phase, fresh, calibrationMotion.values, colors);
+        paintCalibrationStick("left", calibration?.raw, range, phase, fresh, calibrationMotion.values);
+        paintCalibrationStick("right", calibration?.raw, range, phase, fresh, calibrationMotion.values);
         for (const side of ["lt", "rt"]) {
           $("calibration-live-" + side).value = fresh ? calibrationMotion.values[side] : 0;
         }
@@ -2874,22 +2821,14 @@
         const fresh = Boolean(sample?.connected && sample?.fresh);
         const age = Number(sample?.sample_age_ms);
         const rtt = calibrationMotion.roundTripMs;
-        // The numeric values are raw samples; updating them at HTTP snapshot rate
-        // makes the distinction from the visually smoothed plots explicit.
-        for (const [side, xKey, yKey] of [["left", "lx", "ly"], ["right", "rx", "ry"]]) {
-          const label = fresh ? "Raw X " + Math.round(Number(sample?.raw?.[xKey]) || 0) +
-            " · Y " + Math.round(Number(sample?.raw?.[yKey]) || 0) : "Waiting for fresh input";
-          const out = $("calibration-live-" + side + "-values");
-          if (out.textContent !== label) out.textContent = label;
-        }
         $("calibration-live-source").textContent = !sample?.connected ? "Controller disconnected"
           : fresh ? "Sample " + (Number.isFinite(age) ? age + " ms" : "—") +
             " · request " + (rtt === null ? "—" : rtt + " ms")
           : "Waiting for fresh input";
         for (const side of ["lt", "rt"]) {
           const value = fresh ? clamp(Math.round(Number(sample?.raw?.[side]) || 0), 0, 255) : 0;
-          setText("calibration-live-" + side + "-value", fresh ?
-            Math.round(value / 255 * 100) + "%" : "—");
+          $("calibration-live-" + side + "-value").textContent = fresh ?
+            Math.round(value / 255 * 100) + "%" : "—";
         }
         $("calibration-live-hint").textContent = !sample?.connected ? "Connect a Bluetooth controller in Physical mode."
           : !fresh ? "Connected, but no recent controller sample. Move a stick to check input."
@@ -2910,24 +2849,16 @@
           : !calibration.fresh ? "Controller connected; waiting for a fresh input sample. Move a stick, then let it rest."
           : "Profile " + calibration.profile_id + " · " + calibration.samples + " samples · raw sample " + calibration.sample_age_ms + " ms old";
         const values = $("calibration-values");
-        // Keep six stable table rows instead of rebuilding 30 cells on every poll.
-        if (values.rows.length !== 6 || [...values.rows].some((row) => row.cells.length !== 5)) {
-          values.replaceChildren();
-          for (let i = 0; i < 6; ++i) {
-            const row = values.insertRow();
-            for (let j = 0; j < 5; ++j) row.insertCell();
-          }
-        }
+        values.replaceChildren();
         const measured = phase === "idle" ? calibration.calibration : calibration.draft;
-        ["lx", "ly", "rx", "ry", "lt", "rt"].forEach((key, i) => {
+        for (const key of ["lx", "ly", "rx", "ry", "lt", "rt"]) {
           const axis = (measured?.axes || {})[key] || (measured?.triggers || {})[key] || {};
-          [key.toUpperCase(), calibration.raw?.[key], axis.min, axis.center ?? "—", axis.max]
-            .forEach((value, j) => {
-              const text = String(value ?? "—");
-              if (values.rows[i].cells[j].textContent !== text)
-                values.rows[i].cells[j].textContent = text;
-            });
-        });
+          const row = document.createElement("tr");
+          for (const value of [key.toUpperCase(), calibration.raw?.[key], axis.min, axis.center ?? "—", axis.max]) {
+            const cell = document.createElement("td"); cell.textContent = value ?? "—"; row.append(cell);
+          }
+          values.append(row);
+        }
         renderCalibrationButtons();
       }
       async function loadCalibration() {
@@ -2985,7 +2916,7 @@
       $("reload-remapping").addEventListener("click", () => $("reload-profile").click());
       function moveRemapping() {
         const card = $("mapping-card");
-        if (card) (bluetoothSupported === true ? $("remapping-fields") : $("profile-fields")).append(card);
+        if (card) (physicalSupported === true ? $("remapping-fields") : $("profile-fields")).append(card);
       }
 
       const FIELD_SPECS = [
@@ -3146,7 +3077,7 @@
         return field;
       }
       function updateProfileButtons() {
-        const configBlocked = bluetoothSupported === true && (inputMode !== "configure" || modeBusy || modePending);
+        const configBlocked = physicalSupported === true && (inputMode !== "configure" || modeBusy || modePending);
         $("apply-profile").disabled = !profile || profileLoading || maintenanceBusy || remoteMaintenance || wifiScanBusy || configBlocked;
         $("save-profile").disabled = !profile || profileLoading || editing || !profileDirty ||
           maintenanceBusy || remoteMaintenance || wifiScanBusy || configBlocked;
@@ -3264,7 +3195,7 @@
         }
       }
       async function applyProfile() {
-        if (!profile || maintenanceBusy || remoteMaintenance || (bluetoothSupported === true && inputMode !== "configure")) return;
+        if (!profile || maintenanceBusy || remoteMaintenance || (physicalSupported === true && inputMode !== "configure")) return;
         try {
           const next = collectProfile();
           profileLoading = true;
@@ -3298,7 +3229,7 @@
         }
       }
       async function saveProfile() {
-        if (editing || !profileDirty || maintenanceBusy || remoteMaintenance || (bluetoothSupported === true && inputMode !== "configure")) return;
+        if (editing || !profileDirty || maintenanceBusy || remoteMaintenance || (physicalSupported === true && inputMode !== "configure")) return;
         profileLoading = true;
         updateProfileButtons();
         profileMessage("Saving your profile. The adapter will restart…");
@@ -3384,16 +3315,13 @@
         }
       });
       function deviceMessage(id, text, error = false) {
-        const node = $(id);
-        if (!node) return;
-        if (node.textContent !== text) node.textContent = text;
-        const className = "device-copy" + (error ? " error" : "");
-        if (node.className !== className) node.className = className;
+        $(id).textContent = text;
+        $(id).className = "device-copy" + (error ? " error" : "");
       }
       function deviceButtons() {
         const busy = maintenanceBusy || remoteMaintenance;
         const settingsBusy = busy || ledActionBusy || oledActionBusy || wifiRetrying || wifiScanBusy;
-        const modeBlocked = bluetoothSupported === true && (inputMode !== "configure" || modeBusy || modePending);
+        const modeBlocked = physicalSupported === true && (inputMode !== "configure" || modeBusy || modePending);
         const writeBusy = settingsBusy || modeBlocked;
         $("wifi-save").disabled = !wifiLoaded || writeBusy || wifiLoading;
         $("wifi-save").textContent = $("wifi-enabled").checked ? "Save and join" : "Save settings";
@@ -3401,7 +3329,7 @@
         $("wifi-reload").disabled = settingsBusy || wifiLoading;
         const mdnsNetwork = lastStatus?.network || {};
         $("wifi-mdns-retry").disabled = settingsBusy || !online || !mdnsNetwork.ready ||
-          !mdnsNetwork.station_connected;
+          !(mdnsNetwork.station_connected || (mdnsNetwork.bluetooth_available && !mdnsNetwork.station_configured));
         $("wifi-retry").disabled = !wifiLoaded || !networkSettings?.station_enabled || writeBusy || wifiLoading ||
           Boolean(lastStatus?.network?.station_connected || lastStatus?.network?.station_joining || lastStatus?.network?.station_retry_pending);
         $("wifi-ssid").required = $("wifi-enabled").checked;
@@ -3420,38 +3348,29 @@
         for (const id of ["led-apply", "led-save", "led-test"])
           $(id).disabled = !ledLoaded || writeBusy || ledLoading;
         $("led-reload").disabled = settingsBusy || ledLoading;
-        ledFormInputs.forEach((input) =>
+        $("panel-led").querySelectorAll("input,select").forEach((input) =>
           (input.disabled = !ledLoaded || settingsBusy || ledLoading));
-        ledProfileButtons.forEach((button) => (button.disabled = $("led-test").disabled));
-        ledDiagnosticButtons.forEach((button) => (button.disabled = $("led-test").disabled));
+        $("led-profile-colours").querySelectorAll("button").forEach((button) => (button.disabled = $("led-test").disabled));
+        $("led-diagnostic-colours").querySelectorAll("button").forEach((button) => (button.disabled = $("led-test").disabled));
         for (const id of ["oled-apply", "oled-save", "oled-defaults"])
           $(id).disabled = !oledLoaded || !oledSettings?.available || writeBusy || oledLoading;
         $("oled-reload").disabled = settingsBusy || oledLoading;
-        oledFormInputs.forEach((field) =>
+        $("oled-form").querySelectorAll("input,select").forEach((field) =>
           (field.disabled = !oledLoaded || !oledSettings?.available || writeBusy || oledLoading));
         setButtons();
         updateProfileButtons();
       }
-      // Keep existing address links in place until their actual value changes.
-      // This avoids rebuilding anchors on every status poll, and preserves
-      // keyboard focus when a user is about to open a link.
-      function addressLink(id, address, available = true, note = "") {
+      function addressLink(id, address, available = true) {
         const field = $(id);
-        const valid = Boolean(address && available && /^[a-z0-9.\-]+$/i.test(address));
-        const key = JSON.stringify([address || "", valid, note]);
-        if (field.dataset.addressKey === key) return;
-        field.dataset.addressKey = key;
-        if (!address || !valid) {
-          field.textContent = (address || "—") + note;
-          return;
-        }
+        field.replaceChildren();
+        if (!address) { field.textContent = "—"; return; }
+        if (!available || !/^[a-z0-9.\-]+$/i.test(address)) { field.textContent = address; return; }
         const link = document.createElement("a");
         link.href = "http://" + address + "/";
         link.textContent = address;
         link.target = "_blank";
         link.rel = "noopener";
-        field.replaceChildren(link);
-        if (note) field.append(document.createTextNode(note));
+        field.append(link);
       }
       function renderWifiStatus(network = lastStatus?.network || {}) {
         const configured = network.station_configured ?? Boolean(networkSettings?.station_enabled && networkSettings?.station_ssid);
@@ -3485,27 +3404,25 @@
           state = "Joining is off";
           detail = "Turn on joining and save to connect to the saved network.";
         }
-        setText("wifi-status", state);
-        setText("wifi-error-code", network.station_connected ? "None" : code || "None");
-        setText("wifi-saved-network", networkSettings?.station_ssid || "None");
-        setText("wifi-recovery-name", (network.ssid || "Waiting for status…") +
-          (network.ap_active === false ? " · standby" : " · active"));
+        $("wifi-status").textContent = state;
+        $("wifi-error-code").textContent = network.station_connected ? "None" : code || "None";
+        $("wifi-saved-network").textContent = networkSettings?.station_ssid || "None";
+        $("wifi-recovery-name").textContent = (network.ssid || "Waiting for status…") +
+          (network.ap_active === false ? " · standby" : " · active");
         addressLink("wifi-station-address", network.station_connected ? network.station_ip : "");
         if (network.ap_active === false) {
-          delete $("wifi-recovery-address").dataset.addressKey;
-          setText("wifi-recovery-address", "Standby · " + (network.ap_ip || "192.168.4.1") + " when restored");
+          $("wifi-recovery-address").textContent = "Standby · " + (network.ap_ip || "192.168.4.1") + " when restored";
         } else {
           addressLink("wifi-recovery-address", network.ap_ip || "192.168.4.1");
         }
-        const hostname = network.hostname || networkSettings?.hostname || "dcogxw";
-        addressLink("wifi-local-address", hostname + ".local", Boolean(network.mdns_available),
-          network.mdns_available ? "" : " · home Wi-Fi only");
-        setText("wifi-mdns-state", (network.mdns_state || (network.mdns_available ? "active" : "unavailable")).replaceAll("_", " ") +
-          (network.mdns_error ? " · " + errorText(network.mdns_error) : ""));
-        setText("wifi-command-timeouts", valueText(network.command_timeouts));
+        const hostname = network.hostname || networkSettings?.hostname || "dc-ogx-w";
+        addressLink("wifi-local-address", hostname + ".local", Boolean(network.mdns_available));
+        if (!network.mdns_available) $("wifi-local-address").append(document.createTextNode(" · name discovery unavailable"));
+        $("wifi-mdns-state").textContent = (network.mdns_state || (network.mdns_available ? "active" : "unavailable")).replaceAll("_", " ") +
+          (network.mdns_error ? " · " + errorText(network.mdns_error) : "");
+        $("wifi-command-timeouts").textContent = valueText(network.command_timeouts);
         if (network.mdns_state === "deferred") deviceMessage("wifi-mdns-message", "Local-name setup is waiting for controller control to be released.");
-        else if (network.mdns_available) deviceMessage("wifi-mdns-message", "Local-name discovery is active on home Wi-Fi. Use the numeric network address if your PC or router blocks multicast discovery.");
-        else if (!network.station_connected) deviceMessage("wifi-mdns-message", "Local-name discovery requires a home Wi-Fi connection. On the recovery access point, use http://192.168.4.1.");
+        else if (network.mdns_available) deviceMessage("wifi-mdns-message", "The adapter has started its name responder. Use the numeric network address if your PC or router blocks multicast discovery.");
         deviceMessage("wifi-connection-message", detail, failed);
       }
       function wifiWaitReason(reason, fallback) {
@@ -3636,7 +3553,7 @@
           wifiLoaded = true;
           $("wifi-enabled").checked = Boolean(networkSettings.station_enabled || !networkSettings.station_ssid);
           $("wifi-ssid").value = networkSettings.station_ssid || "";
-          $("wifi-hostname").value = networkSettings.hostname || "dcogxw";
+          $("wifi-hostname").value = networkSettings.hostname || "dc-ogx-w";
           $("wifi-password").value = "";
           $("wifi-open").checked = Boolean(networkSettings.station_enabled &&
             networkSettings.station_ssid && !networkSettings.password_saved);
@@ -4151,13 +4068,9 @@
       function valueText(value) {
         return value === undefined || value === null ? "—" : String(value);
       }
-      $("bt-diag-details").addEventListener("toggle", () => {
-        if ($("bt-diag-details").open && lastStatus?.network)
-          renderBluetoothDiagnostics(lastStatus.network);
-      });
       function renderBluetoothDiagnostics(network) {
         const bt = network.bt_hid ?? lastStatus?.network?.bt_hid;
-        const set = setText;
+        const set = (id, value) => { const el = $(id); if (el) el.textContent = value; };
         if (network.bluetooth_available === false) {
           set("bt-diag-chip", "Not available");
           set("bt-diag-controller", "Bluetooth not available");
@@ -4190,10 +4103,7 @@
         set("bt-diag-state", state);
         set("bt-diag-transport", hasConnection ? (bt.le ? "Bluetooth LE" : "Bluetooth Classic") + " · BT " + bt.slot + " / Xbox " + bt.output : "—");
         set("bt-diag-pairing", ["Not observed", "In progress", "Completed", "Failed", "Timeout after READY · ignored by upstream"][bt.pairing_state] || "Unknown");
-        set("bt-diag-reports", hasConnection ? bt.reports + " reports · " + (neverReported ? "none yet" : elapsed(bt.age_ms)) : "—");
-        // Keep the normal status surface cheap; detailed counters are populated
-        // on demand and while troubleshooting is expanded.
-        if (!$('bt-diag-details').open) return;
+        set("bt-diag-reports", hasConnection ? bt.reports + " reports · " + (neverReported ? "none yet" : elapsed(bt.age_ms)) + " · " + bt.callbacks + " callbacks" : "—");
         set("bt-diag-event", elapsed(bt.stage_age_ms));
         set("bt-diag-failure", bt.failure ? (failNames[bt.failure] || "Unknown error") + (bt.error_code ? " (status " + hex(bt.error_code) + ")" : "") + (bt.failure === 1 && bt.pairing_reason ? " · SMP reason " + hex(bt.pairing_reason) : "") + " · " + elapsed(bt.failure_age_ms) : "None observed");
         const reason = bt.hci_reason || 0;
@@ -4221,7 +4131,6 @@
           : bt.failure ? "Failure was observed by the Bluetooth event handler. Details reset when the adapter reboots."
           : "Observed from Bluepad32 callbacks and BTstack pairing/HCI events. Internal GATT errors are not exposed here.");
       }
-      const ledPinLabels = document.querySelectorAll("[data-led-pin]");
       function renderDeviceNetwork(network) {
         if (typeof network.bluetooth_available === "boolean" && bluetoothSupported !== network.bluetooth_available)
           renderInputMode({ bluetooth_supported: network.bluetooth_available });
@@ -4229,36 +4138,35 @@
           // Legacy ESP-AT shares one UART command pipe for HTTP and control.
           // Cap its input traffic at 30Hz to keep settings/status responsive.
           inputHz = Math.min(network.input_hz, network.transport === "esp8285-at" ? 30 : 60);
-        if (network.board) setText("device-board", ({ pico_w_2023: "RP2040-Pico W-2023", pico_w: "Pico W", pico2_w: "Pico 2 W" })[network.board] || network.board);
+        if (network.board) $("device-board").textContent =
+          ({ pico_w_2023: "RP2040-Pico W-2023", pico_w: "Pico W", pico2_w: "Pico 2 W" })[network.board] || network.board;
         renderWifiStatus(network);
         renderBluetoothDiagnostics(network);
-        setText("device-ssid", valueText(network.ssid) + (network.ap_active === false ? " · standby" : ""));
-        setText("device-ip", valueText(network.ip ?? location.hostname));
-        setText("device-wireless", network.bluetooth_available === false ? "Wi-Fi · no Bluetooth" :
-          network.bluetooth_available === true ? "Wi-Fi + Bluetooth" : "Wi-Fi");
-        setText("device-input-rate", inputHz + " Hz");
-        setText("device-station", network.station_connected
-          ? "Connected · " + network.station_ip : $("wifi-status").textContent);
-        setText("device-hostname", network.mdns_available
-          ? network.hostname + ".local" : (network.hostname || "dcogxw") + ".local · home Wi-Fi only");
-        setText("device-led", network.led?.available
-          ? valueText(network.led.state).replaceAll("_", " ") : "Disabled or no PIO resource");
-        setText("led-availability", network.led?.available
+        $("device-ssid").textContent = valueText(network.ssid) + (network.ap_active === false ? " · standby" : "");
+        $("device-ip").textContent = valueText(network.ip ?? location.hostname);
+        $("device-wireless").textContent =
+          network.bluetooth_available === false ? "Wi-Fi · no Bluetooth" :
+          network.bluetooth_available === true ? "Wi-Fi + Bluetooth" : "Wi-Fi";
+        $("device-input-rate").textContent = inputHz + " Hz";
+        $("device-station").textContent = network.station_connected
+          ? "Connected · " + network.station_ip : $("wifi-status").textContent;
+        $("device-hostname").textContent = network.mdns_available
+          ? network.hostname + ".local" : (network.hostname || "dc-ogx-w") + ".local · mDNS unavailable";
+        $("device-led").textContent = network.led?.available
+          ? valueText(network.led.state).replaceAll("_", " ") : "Disabled or no PIO resource";
+        $("led-availability").textContent = network.led?.available
           ? network.led.enabled === false ? "Ready · LED turned off" : "Ready"
-          : "Not available");
-        setText("led-state", network.led?.state === "test" ? "Colour test · returns automatically"
+          : "Not available";
+        $("led-state").textContent = network.led?.state === "test" ? "Colour test · returns automatically"
           : network.led?.state === "profile" ? "Active profile colour"
           : network.led?.state === "off" ? "Off"
-          : LED_STATES.find(([key]) => key === network.led?.state)?.[1] || valueText(network.led?.state).replaceAll("_", " "));
+          : LED_STATES.find(([key]) => key === network.led?.state)?.[1] || valueText(network.led?.state).replaceAll("_", " ");
         const ledPin = Number.isInteger(network.led?.pin) && network.led.pin >= 0 && network.led.pin <= 29 ? network.led.pin : 8;
-        const pinText = "GPIO " + ledPin;
-        for (const label of ledPinLabels)
-          if (label.textContent !== pinText) label.textContent = pinText;
+        document.querySelectorAll("[data-led-pin]").forEach((label) => (label.textContent = "GPIO " + ledPin));
       }
       function updateStatus(s) {
         lastStatus = s;
         renderInputMode(s.control || {});
-        if (s.network?.transport) setApiTransport(s.network.transport);
         const mode = s.output_mode ?? s.mode ?? s.driver ?? "—",
           remote = s.control ?? s.remote ?? {},
           network = s.network ?? {},
@@ -4272,7 +4180,8 @@
           message("Ready. Take control when you want to send input.");
         }
         deviceButtons();
-        setText("mode-chip", typeof mode === "object"
+        $("mode-chip").textContent =
+          typeof mode === "object"
             ? valueText(mode.name)
             : {
                 XBOXOG: "Original Xbox",
@@ -4284,12 +4193,13 @@
                 SWITCH: "Nintendo Switch",
                 STEAM: "Steam",
                 WEBAPP: "USB configuration",
-              }[mode] || valueText(mode));
-        setText("device-mode", $("mode-chip").textContent);
-        setText("info-output", $("mode-chip").textContent);
+              }[mode] || valueText(mode);
+        $("info-output").textContent = $("device-mode").textContent = $("mode-chip").textContent;
         const mounted = network.usb_configured ?? s.usb_mounted ?? usb.mounted;
-        setText("info-usb", mounted === true ? "Console connected" : mounted === false ? "Waiting for console" : "—");
-        setText("info-source", s.output_source === "remote"
+        $("info-usb").textContent =
+          mounted === true ? "Console connected" : mounted === false ? "Waiting for console" : "—";
+        $("info-source").textContent =
+          s.output_source === "remote"
             ? "Remote"
             : s.output_source === "neutral"
               ? "Neutral"
@@ -4301,32 +4211,34 @@
                     ? "Remote"
                     : network.bluetooth_available === false
                       ? "No remote input"
-                      : valueText(s.input_source ?? "Local controller"));
+                      : valueText(s.input_source ?? "Local controller");
         if (Number.isInteger(s.applied_profile_id)) appliedProfileId = s.applied_profile_id;
         renderAppliedProfile();
         renderDeviceNetwork({ ...network, ssid: network.ssid ?? s.ssid, ip: network.ip ?? s.ip });
-        if (s.board) setText("device-board", s.board);
+        if (s.board) $("device-board").textContent = s.board;
         const firmware = s.remote_version ? "dc-ogx-w " + s.remote_version : s.firmware_version ?? s.version ?? s.firmware;
-        if (firmware) setText("device-version", firmware);
+        if (firmware) $("device-version").textContent = firmware;
         deviceMessage("device-information-message", "Live board information.");
-        setText("device-timeouts", valueText(remote.expired ?? remote.timeouts ?? 0));
+        $("device-timeouts").textContent = valueText(remote.expired ?? remote.timeouts ?? 0);
         const up = s.uptime_ms !== undefined ? s.uptime_ms / 1000 : s.uptime_s;
-        setText("device-uptime", up === undefined
+        $("device-uptime").textContent =
+          up === undefined
             ? "—"
             : Math.floor(up / 3600) +
               "h " +
               Math.floor((up % 3600) / 60) +
               "m " +
               Math.floor(up % 60) +
-              "s");
-        setText("footer-status", "Connected · " + valueText(network.ip ?? s.ip ?? location.hostname));
+              "s";
+        $("footer-status").textContent =
+          "Connected · " + valueText(network.ip ?? s.ip ?? location.hostname);
       }
       let statusFailures = 0;
       let lastGoodStatusAt = 0;
       async function pollStatus() {
         // A failed telemetry poll should not keep the next profile or LED
         // request waiting behind it on the ESP's serialized AT transport.
-        if (!maintenanceBusy && apiTransport === "serialized" && queuedApiRequests > 0) {
+        if (!maintenanceBusy && queuedApiRequests > 0 && activeTab !== "calibration") {
           setTimeout(pollStatus, 1500);
           return;
         }
@@ -4357,7 +4269,7 @@
           const becameOnline = !online;
           online = true;
           $("connection-chip").classList.add("online");
-          setText("connection-text", "Connected");
+          $("connection-text").textContent = "Connected";
           updateStatus(s);
           if (becameOnline && token === null && !connecting && !controlWanted)
             message("Ready. Take control when you want to send input.");
@@ -4371,14 +4283,14 @@
           // stream disconnected. The periodic telemetry request is not a heartbeat.
           if (!busyReply && statusFailures >= 3 && !controlConnected) online = false;
           $("connection-chip").classList.toggle("online", online);
-          setText("connection-text", wifiScanBusy ? "Scanning Wi-Fi"
+          $("connection-text").textContent = wifiScanBusy ? "Scanning Wi-Fi"
             : recentlyHealthy || controlConnected ? "Connected"
-            : busyReply ? "Status delayed" : "Offline");
-          setText("footer-status", recentlyHealthy
+            : busyReply ? "Status delayed" : "Offline";
+          $("footer-status").textContent = recentlyHealthy
             ? "Connected · telemetry retrying"
             : controlConnected ? "Control connected · telemetry delayed"
             : wifiScanBusy ? "Wi-Fi scan in progress · waiting for status"
-            : busyReply ? "Adapter responding · status delayed" : "Adapter unavailable");
+            : busyReply ? "Adapter responding · status delayed" : "Adapter unavailable";
           if (!recentlyHealthy && lastStatus) deviceMessage("device-information-message",
             "Live status is delayed. Showing the last received board information.");
           // Only advise reconnecting after sustained failures, not on one
@@ -4387,8 +4299,7 @@
             message("Connect to the adapter’s Wi-Fi or your saved network, then keep this page open.");
         }
         setButtons();
-        setTimeout(pollStatus, statusFailures ? 6000 : apiTransport === "native"
-          ? (token === null ? 2000 : 3000) : (token === null ? 3500 : 5000));
+        setTimeout(pollStatus, statusFailures ? 6000 : token === null ? 3500 : 5000);
       }
       $("host-label").textContent = location.host;
       let gamepadAllowed = typeof navigator.getGamepads === "function";

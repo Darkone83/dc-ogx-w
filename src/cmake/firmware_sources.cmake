@@ -2,6 +2,8 @@
 set(DC_OGX_FIRMWARE_SOURCES
     src/main.cpp
     src/OGXMini/OGXMini.cpp
+    src/OGXMini/Board/PicoW.cpp
+    src/OGXMini/Board/RadioBackend.cpp
     src/TaskQueue/TaskQueue.cpp
     src/DeviceServices/DeviceServices.cpp
     src/Display/OledDisplay.cpp
@@ -54,7 +56,6 @@ set(DC_OGX_FIRMWARE_SOURCES
 
 if(DC_OGX_HAS_BLUETOOTH)
     list(APPEND DC_OGX_FIRMWARE_SOURCES
-        src/OGXMini/Board/PicoW.cpp
         src/Board/board_api_private/board_api_bt.cpp
         src/NetworkService/Cyw43Transport.cpp
         src/NetworkService/UdpDiscovery.cpp
@@ -70,42 +71,23 @@ if(DC_OGX_HAS_BLUETOOTH)
     )
 else()
     list(APPEND DC_OGX_FIRMWARE_SOURCES
-        src/OGXMini/Board/PicoW2023.cpp
         src/NetworkService/EspAtProtocol.cpp
         src/NetworkService/EspAtTransport.cpp
     )
 endif()
 
-# Experimental PIO-USB controller input. The original OGX-Mini HostManager
-# supports HID and XInput controllers; the native USB device output is retained.
+# USB input is limited to the requested Xbox One/Series, DS4, DS5 and Switch
+# Pro families. Bluetooth and all native-output/addon sources above are Curr5.
 if(DC_OGX_USB_HOST_ENABLED)
     list(APPEND DC_OGX_FIRMWARE_SOURCES
-        src/USBHost/WiredHost.cpp
         src/USBHost/tuh_callbacks.cpp
-        # Required by XInputDevice::process() when CONFIG_EN_USB_HOST=1.
-        # This function is defined in the Trace TU even in Release builds.
+        # Curr5 native XInput output uses this unchanged status helper. It does
+        # not instantiate a GameSir USB host driver.
         src/USBHost/HostDriver/GameSirCyclone2/GameSirCyclone2Trace.cpp
-        src/USBHost/HostDriver/DInput/DInput.cpp
-        src/USBHost/HostDriver/PSClassic/PSClassic.cpp
-        src/USBHost/HostDriver/SwitchWired/SwitchWired.cpp
         src/USBHost/HostDriver/SwitchPro/SwitchPro.cpp
-        src/USBHost/HostDriver/SwitchPro/Switch2ProHost.cpp
         src/USBHost/HostDriver/PS5/PS5.cpp
         src/USBHost/HostDriver/PS4/PS4.cpp
-        src/USBHost/HostDriver/PS3/PS3.cpp
-        src/USBHost/HostDriver/N64/N64.cpp
-        src/USBHost/HostDriver/HIDGeneric/HIDGeneric.cpp
-        src/USBHost/HostDriver/GameSirG7Pro/GameSirG7Pro.cpp
-        src/USBHost/HIDParser/HIDJoystick.cpp
-        src/USBHost/HIDParser/HIDReportDescriptor.cpp
-        src/USBHost/HIDParser/HIDReportDescriptorElements.cpp
-        src/USBHost/HIDParser/HIDReportDescriptorUsages.cpp
-        src/USBHost/HIDParser/HIDUtils.cpp
-        src/USBHost/HostDriver/XInput/XboxOG.cpp
         src/USBHost/HostDriver/XInput/XboxOne.cpp
-        src/USBHost/HostDriver/XInput/Xbox360.cpp
-        src/USBHost/HostDriver/XInput/Xbox360W.cpp
         src/USBHost/HostDriver/XInput/tuh_xinput/tuh_xinput.cpp
-        src/USBHost/HostDriver/VictrixGambit/VictrixGambit.cpp
     )
 endif()

@@ -26,23 +26,43 @@ if(DC_OGX_HAS_BLUETOOTH)
         "${DC_OGX_BTSTACK_REVISION}" src/bluetooth.h)
 endif()
 dc_ogx_fetch(tinyusb https://github.com/MegaCadeDev/tinyusb.git
-    94fd88304851fd03c51a0666f318540aae550655 src/tusb.c)
+    8a0c0c0643db0f8b0b7a76d85968d2c4e79411fd src/tusb.c)
 dc_ogx_fetch(libfixmath https://github.com/PetteriAimonen/libfixmath.git
     d308e466e1a09118d03f677c52e5fbf402f6fdd0 CMakeLists.txt)
 
 if(DC_OGX_USB_HOST_ENABLED)
-    # Use the locally installed PIO-USB checkout if supplied; otherwise fetch it.
-    # The experimental build currently follows upstream main. Pin to the exact
-    # working commit once verified with the user's Pico SDK/TinyUSB fork.
+    # One fixed reference for both radios: OGX-Mini 2026's PIO USB gitlink.
+    set(DC_OGX_PIO_USB_REVISION "d17f8efe9e6ee266d0b818634ca0ac256825579f")
+    set(_pio_use_override FALSE)
     if(PICO_PIO_USB_PATH)
-        if(NOT EXISTS "${PICO_PIO_USB_PATH}/src/pio_usb.c")
-            message(FATAL_ERROR "PICO_PIO_USB_PATH must contain src/pio_usb.c")
+        get_filename_component(PICO_PIO_USB_PATH "${PICO_PIO_USB_PATH}" ABSOLUTE
+            BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        file(RELATIVE_PATH _pio_relative "${CMAKE_CURRENT_BINARY_DIR}" "${PICO_PIO_USB_PATH}")
+        # Refresh a previous build-owned checkout automatically. Preserve an
+        # explicit external checkout, but verify its revision below.
+        if(_pio_relative MATCHES "^\\.\\./" OR IS_ABSOLUTE "${_pio_relative}")
+            set(_pio_use_override TRUE)
         endif()
-    else()
-        dc_ogx_fetch(pio_usb https://github.com/wiredopposite/Pico-PIO-USB.git
-            main src/pio_usb.c)
-        set(PICO_PIO_USB_PATH "${pio_usb_SOURCE_DIR}")
     endif()
+    if(_pio_use_override)
+        set(_pio_source "${PICO_PIO_USB_PATH}")
+    else()
+        # New identity prevents stale floating-main worktrees on Compile.
+        dc_ogx_fetch(pio_usb_reference https://github.com/wiredopposite/Pico-PIO-USB.git
+            "${DC_OGX_PIO_USB_REVISION}" src/pio_usb.c)
+        set(_pio_source "${pio_usb_reference_SOURCE_DIR}")
+    endif()
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${_pio_source}" rev-parse HEAD
+        OUTPUT_VARIABLE _pio_revision OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _pio_git_result)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${_pio_source}" status --porcelain --untracked-files=no
+        OUTPUT_VARIABLE _pio_changes OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _pio_status_result)
+    if(NOT EXISTS "${_pio_source}/src/pio_usb.c" OR
+       NOT _pio_git_result EQUAL 0 OR NOT _pio_status_result EQUAL 0 OR
+       NOT _pio_revision STREQUAL DC_OGX_PIO_USB_REVISION OR NOT "${_pio_changes}" STREQUAL "")
+        message(FATAL_ERROR "PIO USB must be a clean checkout at ${DC_OGX_PIO_USB_REVISION}: ${_pio_source}")
+    endif()
+    set(PICO_PIO_USB_PATH "${_pio_source}")
+    message(STATUS "dc-ogx-w: shared PIO USB reference ${DC_OGX_PIO_USB_REVISION}")
 endif()
 
 # Exactly one local compatibility patch: OGX-Mini 2026's BTstack HIDS

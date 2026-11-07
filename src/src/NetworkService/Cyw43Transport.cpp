@@ -54,9 +54,12 @@ const char* station_error = "";
 std::uint32_t station_due{};
 std::uint32_t station_reconnects{};
 bool mdns_initialized{};
+bool mdns_ap{};
 bool mdns_sta{};
+bool mdns_ap_confirmed{};
 bool mdns_sta_confirmed{};
 bool mdns_retry_pending{};
+const char* mdns_ap_error = "";
 const char* mdns_sta_error = "";
 std::uint32_t mdns_attempts{};
 WifiScan::Cache scan_cache;
@@ -73,6 +76,10 @@ bool due(std::uint32_t now, std::uint32_t deadline) {
 }
 
 void mdns_result(netif* interface, u8_t result, s8_t) {
+    if (interface == &cyw43_state.netif[CYW43_ITF_AP]) {
+        mdns_ap_confirmed = result == MDNS_PROBING_SUCCESSFUL;
+        mdns_ap_error = mdns_ap_confirmed ? "" : "mdns_name_conflict";
+    }
     if (interface == &cyw43_state.netif[CYW43_ITF_STA]) {
         mdns_sta_confirmed = result == MDNS_PROBING_SUCCESSFUL;
         mdns_sta_error = mdns_sta_confirmed ? "" : "mdns_name_conflict";
@@ -81,7 +88,7 @@ void mdns_result(netif* interface, u8_t result, s8_t) {
 
 bool add_mdns(netif* interface) {
     if (mdns_attempts != UINT32_MAX) ++mdns_attempts;
-    const char*& error = mdns_sta_error;
+    const char*& error = interface == &cyw43_state.netif[CYW43_ITF_STA] ? mdns_sta_error : mdns_ap_error;
     if (mdns_resp_add_netif(interface, network_config.hostname) != ERR_OK) {
         error = "mdns_start_failed";
         return false;
@@ -96,18 +103,29 @@ bool add_mdns(netif* interface) {
 
 void restart_mdns(netif* interface) {
     if (mdns_attempts != UINT32_MAX) ++mdns_attempts;
-    mdns_sta_confirmed = false;
-    mdns_sta_error = "";
+    if (interface == &cyw43_state.netif[CYW43_ITF_STA]) {
+        mdns_sta_confirmed = false;
+        mdns_sta_error = "";
+    } else {
+        mdns_ap_confirmed = false;
+        mdns_ap_error = "";
+    }
     mdns_resp_restart(interface);
 }
 
 void poll_mdns() {
     if (!mdns_retry_pending || control_active || station_joining ||
         cyw43_wifi_scan_active(&cyw43_state)) return;
-    if (!station_connected) return;
-    auto* interface = &cyw43_state.netif[CYW43_ITF_STA];
-    if (mdns_sta) restart_mdns(interface);
-    else mdns_sta = add_mdns(interface);
+    if (station_enabled) {
+        if (!station_connected) return;
+        auto* interface = &cyw43_state.netif[CYW43_ITF_STA];
+        if (mdns_sta) restart_mdns(interface);
+        else mdns_sta = add_mdns(interface);
+    } else {
+        auto* interface = &cyw43_state.netif[CYW43_ITF_AP];
+        if (mdns_ap) restart_mdns(interface);
+        else mdns_ap = add_mdns(interface);
+    }
     mdns_retry_pending = false;
 }
 
@@ -221,7 +239,7 @@ void poll_station(std::uint32_t now) {
 
 // The official Pico W has separate netifs, but both share one CYW43 radio.
 // Leave SoftAP available for provisioning; after successful DHCP, disable it
-// and deinit its AP-only DHCP service. Restore after a sustained loss.
+// and deinit its AP-only DHCP/mDNS services. Restore after a sustained loss.
 // This runs in radio_tick's existing CYW43 async context, never from USB IRQ.
 void poll_ap_mode(std::uint32_t now) {
     if (!station_enabled || !server_ready) return;
@@ -229,6 +247,9 @@ void poll_ap_mode(std::uint32_t now) {
     // association and DHCP have succeeded.  AP clients will need to use the
     // station IP after cutover; the TCP listener continues on the STA netif.
     if (station_connected && ap_active && due(now, ap_cutover_due)) {
+        if (mdns_ap) mdns_resp_remove_netif(&cyw43_state.netif[CYW43_ITF_AP]);
+        mdns_ap = mdns_ap_confirmed = false;
+        mdns_ap_error = "";
         if (dhcp.udp) dhcp_server_deinit(&dhcp);
         cyw43_arch_disable_ap_mode();
         netif_set_default(&cyw43_state.netif[CYW43_ITF_STA]);
@@ -253,9 +274,12 @@ void poll_ap_mode(std::uint32_t now) {
         netif_set_addr(interface, &address, &mask, &gateway);
         netif_set_default(interface);
         dhcp_server_init(&dhcp, interface, &address, &mask);
+        mdns_ap = add_mdns(interface);
         ap_active = dhcp.udp != nullptr;
         if (!ap_active) {
             last_error = "ap_dhcp_restore_failed";
+            if (mdns_ap) mdns_resp_remove_netif(interface);
+            mdns_ap = mdns_ap_confirmed = false;
             cyw43_arch_disable_ap_mode();
             ap_restore_due = now + 30000;
         } else {
@@ -510,6 +534,7 @@ bool start(const Config &config, const Callbacks &sink) {
             mdns_resp_register_name_result_cb(mdns_result);
             mdns_initialized = true;
         }
+        mdns_ap = add_mdns(&cyw43_state.netif[CYW43_ITF_AP]);
         UdpDiscovery::start(&cyw43_state.netif[CYW43_ITF_AP],
                             &cyw43_state.netif[CYW43_ITF_STA]);
         station_due = to_ms_since_boot(get_absolute_time());
@@ -559,7 +584,7 @@ bool retry_connection() {
 }
 
 bool retry_mdns() {
-    if (!server_ready || !mdns_initialized || !station_connected) return false;
+    if (!server_ready || !mdns_initialized || (station_enabled && !station_connected)) return false;
     mdns_retry_pending = true;
     return true;
 }
@@ -619,13 +644,13 @@ Status status() {
     value.station_retry_pending = station_retry_pending;
     value.station_ip = station_ip;
     value.hostname = network_config.hostname;
-    value.mdns_available = station_connected && mdns_sta_confirmed;
+    value.mdns_available = station_enabled ? (station_connected && mdns_sta_confirmed) : mdns_ap_confirmed;
     value.control_ready = server_ready && !station_joining && !cyw43_wifi_scan_active(&cyw43_state);
     value.control_waiting_for = !server_ready ? "radio_starting" : station_joining ? "station_join" :
         cyw43_wifi_scan_active(&cyw43_state) ? "scan" : "";
-    value.mdns_error = mdns_sta_error;
+    value.mdns_error = station_enabled ? mdns_sta_error : mdns_ap_error;
     value.mdns_attempts = mdns_attempts;
-    value.mdns_state = !station_connected ? "waiting_for_station" :
+    value.mdns_state = station_enabled && !station_connected ? "waiting_for_station" :
         mdns_retry_pending ? (control_active ? "deferred" : "queued") :
         value.mdns_available ? "active" : value.mdns_error[0] ? "failed" : "starting";
     value.station_error = station_error;

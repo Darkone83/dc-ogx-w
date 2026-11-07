@@ -74,13 +74,8 @@
 // Enable Device stack, Default is max speed that hardware controller could support with on-chip PHY
 #define CFG_TUD_ENABLED       1
 #define CFG_TUD_MAX_SPEED     BOARD_TUD_MAX_SPEED
-// dc-ogx-w uses the board's built-in connector as a USB device. A USB host
-// stack is present only for legacy board builds that explicitly enable it.
-#if defined(CONFIG_EN_USB_HOST)
+// Enable Host stack, Default is max speed that hardware controller could support with on-chip PHY
 #define CFG_TUH_ENABLED       1
-#else
-#define CFG_TUH_ENABLED       0
-#endif
 #define CFG_TUH_MAX_SPEED     BOARD_TUH_MAX_SPEED
 
 /* USB DMA on some MCUs can only access a specific SRAM region with restriction on alignment.
@@ -132,6 +127,8 @@
 #if defined(CONFIG_EN_USB_HOST)
 
 // Enable host stack with pio-usb if Pico-PIO-USB library is available
+#define CFG_TUH_ENABLED     1
+
 #if defined(PIO_USB_CONFIG)
 #define CFG_TUH_RPI_PIO_USB 1
 #endif
@@ -147,14 +144,12 @@
 #if defined(CONFIG_EN_4CH)
 #define CFG_TUH_HID             1
 #else
-/* Gamepads + spare composite HID IFs (vendor/config, kb/mouse). GameSir G7 Pro
- * exposes gamepad + 0xFFF0 — CFG_TUH_HID==MAX_GAMEPADS alone asserts on IF1. */
-#define CFG_TUH_HID             (MAX_GAMEPADS + 3)
+#define CFG_TUH_HID             MAX_GAMEPADS
 #endif
 
 #define CFG_TUH_MSC             0
 #define CFG_TUH_VENDOR          0
-#define CFG_TUH_XINPUT          OGXM_TUH_XINPUT_INSTANCES
+#define CFG_TUH_XINPUT          MAX_GAMEPADS
 
 // max device support (excluding hub device)
 #define CFG_TUH_DEVICE_MAX          (CFG_TUH_HUB ? 4 : 1) // hub typically has 4 ports

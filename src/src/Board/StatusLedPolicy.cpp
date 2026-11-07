@@ -105,6 +105,17 @@ Output Policy::render(std::uint32_t now_ms, const State& state,
 }
 
 const char* state_name(Phase phase) {
+    // Direct USB bring-up markers are not entries in the saved LED palette.
+    switch (phase) {
+        case Phase::UsbWaitRadio: return "usb_wait_radio";
+        case Phase::UsbDebounce: return "usb_debounce";
+        case Phase::UsbHandoff: return "usb_bt_handoff";
+        case Phase::UsbInit: return "usb_tinyusb_init";
+        case Phase::UsbEnumerating: return "usb_enumerating";
+        case Phase::UsbMounted: return "usb_mounted";
+        case Phase::UsbFault: return "usb_timeout_or_error";
+        default: break;
+    }
     if (phase == Phase::Profile) return "profile";
     if (phase == Phase::Test) return "test";
     if (phase == Phase::Off) return "off";

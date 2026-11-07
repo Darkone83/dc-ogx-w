@@ -228,7 +228,7 @@ public:
         return pad_in;
     }
 
-    // Telemetry after DeviceDriver::process must not consume another event.
+    // Observe the already-consumed output without draining controller input.
     inline PadIn peek_consumed_pad_in()
     {
         mutex_enter_blocking(&pad_in_mutex_);
@@ -276,9 +276,7 @@ public:
         set_profile_settings(user_profile, driver);
     }
 
-    // Called only by the radio core between input callbacks, alongside profile
-    // application. Browser/PC input already has its own controller calibration
-    // and must not inherit offsets measured from a different Bluetooth pad.
+    // Radio-core calibration applies only to the physical Bluetooth source.
     void set_bluetooth_calibration(const ControllerCalibration& calibration) {
         bluetooth_calibration_ = calibration.valid() ? calibration : ControllerCalibration{};
     }

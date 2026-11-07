@@ -4,9 +4,7 @@
 
 #include "Board/Config.h"
 #include "Board/ogxm_log.h"
-#if defined(CONFIG_EN_USB_HOST)
 #include "USBHost/HostDriver/GameSirCyclone2/GameSirCyclone2Trace.h"
-#endif
 #include "USBHost/HostDriver/GameSirCyclone2/GameSirCyclone2Transport.h"
 #include "controller/uni_controller_type.h"
 
@@ -77,9 +75,7 @@ void arm_bt_switch_face_swap_if_needed(const uni_hid_device_t* device) {
         return;
     }
     bt_switch_face_swap_armed_ = true;
-#if defined(CONFIG_EN_USB_HOST)
     GameSirCyclone2Trace::set_cyclone_switch_input_active(true);
-#endif
     OGXM_LOG("[CYCLONE2 BT] Switch face map armed (final XInput A↔B X↔Y) name=\"%s\"\n",
              device->name[0] ? device->name : "?");
 }
@@ -89,9 +85,7 @@ void clear_bt_switch_face_swap_if_armed() {
         return;
     }
     bt_switch_face_swap_armed_ = false;
-#if defined(CONFIG_EN_USB_HOST)
     GameSirCyclone2Trace::set_cyclone_switch_input_active(false);
-#endif
     OGXM_LOG("[CYCLONE2 BT] Switch face map cleared\n");
 }
 

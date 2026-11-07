@@ -3,10 +3,168 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 namespace RemoteControl {
+namespace {
+
+// A number is limited to 39 characters. After the decimal range checks below,
+// its exact numerator/denominator and the binary rounding workspace fit here.
+// Keeping these words local avoids Newlib strtod's shared heap workspace in
+// the radio callback, including for subnormal and overflow boundary values.
+struct DecimalWords {
+    uint32_t word[40]{};
+    unsigned used{};
+
+    void digit(unsigned value) {
+        uint64_t carry = value;
+        for (unsigned i = 0; i < used; ++i) {
+            carry += uint64_t(word[i]) * 10u;
+            word[i] = uint32_t(carry);
+            carry >>= 32;
+        }
+        if (carry) word[used++] = uint32_t(carry);
+    }
+    unsigned bits() const {
+        if (!used) return 0;
+        unsigned count = (used - 1) * 32;
+        for (uint32_t top = word[used - 1]; top; top >>= 1) ++count;
+        return count;
+    }
+    void shift(unsigned count) {
+        if (!used || !count) return;
+        const unsigned whole = count / 32, part = count % 32;
+        uint32_t carry = 0;
+        if (part) {
+            for (unsigned i = 0; i < used; ++i) {
+                const uint64_t value = (uint64_t(word[i]) << part) | carry;
+                word[i] = uint32_t(value);
+                carry = uint32_t(value >> 32);
+            }
+            if (carry) word[used++] = carry;
+        }
+        for (unsigned i = used; i; --i) word[i - 1 + whole] = word[i - 1];
+        for (unsigned i = 0; i < whole; ++i) word[i] = 0;
+        used += whole;
+    }
+    void halve() {
+        uint32_t carry = 0;
+        for (unsigned i = used; i; --i) {
+            const uint32_t next = word[i - 1] << 31;
+            word[i - 1] = (word[i - 1] >> 1) | carry;
+            carry = next;
+        }
+        if (used && !word[used - 1]) --used;
+    }
+    int compare(const DecimalWords& other) const {
+        if (used != other.used) return used < other.used ? -1 : 1;
+        for (unsigned i = used; i; --i)
+            if (word[i - 1] != other.word[i - 1])
+                return word[i - 1] < other.word[i - 1] ? -1 : 1;
+        return 0;
+    }
+    void subtract(const DecimalWords& other) {
+        uint64_t borrow = 0;
+        for (unsigned i = 0; i < used; ++i) {
+            const uint64_t value = uint64_t(word[i]) -
+                (i < other.used ? other.word[i] : 0u) - borrow;
+            word[i] = uint32_t(value);
+            borrow = value >> 63;
+        }
+        while (used && !word[used - 1]) --used;
+    }
+};
+
+bool decimal_double(const char* text, size_t length, double& output) {
+    static_assert(sizeof(double) == sizeof(uint64_t), "JSON requires binary64 double");
+    const char* const end = text + length;
+    uint64_t sign = 0;
+    if (text != end && *text == '-') { sign = uint64_t(1) << 63; ++text; }
+    DecimalWords numerator, denominator, trial;
+    unsigned significant = 0, fractional = 0;
+    const auto take_digit = [&] {
+        const unsigned digit = unsigned(*text++ - '0');
+        numerator.digit(digit);
+        if (significant || digit) ++significant;
+    };
+    if (text == end || *text < '0' || *text > '9') return false;
+    if (*text == '0') {
+        take_digit();
+        if (text != end && *text >= '0' && *text <= '9') return false;
+    } else {
+        do { take_digit(); } while (text != end && *text >= '0' && *text <= '9');
+    }
+    if (text != end && *text == '.') {
+        ++text;
+        if (text == end || *text < '0' || *text > '9') return false;
+        do { take_digit(); ++fractional; }
+        while (text != end && *text >= '0' && *text <= '9');
+    }
+    int decimal_exponent = 0;
+    if (text != end && (*text == 'e' || *text == 'E')) {
+        ++text;
+        bool negative = false;
+        if (text != end && (*text == '+' || *text == '-')) negative = *text++ == '-';
+        if (text == end || *text < '0' || *text > '9') return false;
+        do {
+            if (decimal_exponent < 10000)
+                decimal_exponent = decimal_exponent * 10 + (*text - '0');
+            ++text;
+        } while (text != end && *text >= '0' && *text <= '9');
+        if (negative) decimal_exponent = -decimal_exponent;
+    }
+    if (text != end) return false;
+    decimal_exponent -= int(fractional);
+    const int decimal_order = int(significant) + decimal_exponent;
+    if (numerator.used && decimal_order > 309) return false;
+    if (!numerator.used || decimal_order < -323) {
+        std::memcpy(&output, &sign, sizeof output);
+        return true;
+    }
+    denominator.digit(1);
+    for (int i = 0; i < decimal_exponent; ++i) numerator.digit(0);
+    for (int i = 0; i > decimal_exponent; --i) denominator.digit(0);
+    int exponent = int(numerator.bits()) - int(denominator.bits());
+    if (exponent >= 0) {
+        trial = denominator;
+        trial.shift(unsigned(exponent));
+        if (numerator.compare(trial) < 0) --exponent;
+    } else {
+        trial = numerator;
+        trial.shift(unsigned(-exponent));
+        if (trial.compare(denominator) < 0) --exponent;
+    }
+    if (exponent > 1023) return false;
+    const bool subnormal = exponent < -1022;
+    const int binary_shift = subnormal ? 1074 : 52 - exponent;
+    if (binary_shift >= 0) numerator.shift(unsigned(binary_shift));
+    else denominator.shift(unsigned(-binary_shift));
+    int quotient_bit = int(numerator.bits()) - int(denominator.bits());
+    trial = denominator;
+    if (quotient_bit >= 0) trial.shift(unsigned(quotient_bit));
+    uint64_t quotient = 0;
+    for (; quotient_bit >= 0; --quotient_bit) {
+        if (numerator.compare(trial) >= 0) {
+            numerator.subtract(trial);
+            quotient |= uint64_t(1) << unsigned(quotient_bit);
+        }
+        trial.halve();
+    }
+    numerator.shift(1);
+    const int round = numerator.compare(denominator);
+    if (round > 0 || (!round && (quotient & 1u))) ++quotient;
+    uint64_t encoded;
+    if (subnormal) encoded = sign | quotient;
+    else {
+        if (quotient == (uint64_t(1) << 53)) { quotient >>= 1; ++exponent; }
+        if (exponent > 1023) return false;
+        encoded = sign | (uint64_t(exponent + 1023) << 52) |
+            (quotient & ((uint64_t(1) << 52) - 1));
+    }
+    std::memcpy(&output, &encoded, sizeof output);
+    return true;
+}
+} // namespace
 
 void Json::whitespace() {
     while (pos_ < length_ && (data_[pos_] == ' ' || data_[pos_] == '\t' ||
@@ -147,12 +305,7 @@ bool Json::number(int token, double& value) const {
     const Token& t = tokens_[token];
     const size_t n = t.end - t.begin;
     if (!n || n >= 40) return false;
-    char number_text[40];
-    std::memcpy(number_text, data_ + t.begin, n);
-    number_text[n] = '\0';
-    char* end = nullptr;
-    value = std::strtod(number_text, &end);
-    return end == number_text + n && std::isfinite(value);
+    return decimal_double(data_ + t.begin, n, value);
 }
 
 bool Json::integer(int token, int64_t min, int64_t max, int64_t& value) const {

@@ -22,13 +22,10 @@ void tick(uint32_t now_ms);
 Gamepad& output_gamepad(Gamepad& local);
 void on_output_processed(Gamepad& output);
 
-// Core0 skips physical input producer polling while this handshake is active.
-// Call the apply hook from the Core1 radio loop, serialized with its input
-// producers (BT callbacks on the official board; the 2023 target has no local
-// input producer and uses Wi-Fi remote input).
-// The SDK may run this in its background IRQ: it must not wait or allocate.
-// No Bluetooth parser is active there, so a complete profile becomes visible with
-// respect to both wired and Bluetooth report parsing.
+// USB service continues throughout this handshake. Bluetooth report callbacks
+// skip profile reads while it is pending. The serialized radio apply hook only
+// acknowledges quiescence; Core0 tick commits the configurations between USB
+// visits. The clone uses the same acknowledgement without a Bluetooth producer.
 bool profile_apply_pending();
 void apply_profile_on_radio_core();
 
@@ -51,20 +48,19 @@ HttpResult handle_ws(const char* json, size_t length,
                      char* output, size_t capacity, uint32_t now_ms);
 void release_token(uint32_t token, uint32_t now_ms);
 
-#if defined(CONFIG_OGXM_BOARD_PI_PICOW_2023)
-// Clone board: a fixed three-slot, single-producer/single-consumer RPC mailbox.
-// Network Core1 publishes only borrowed, stable request/response buffers and
-// never executes controller state transitions inside a UART callback. Core0
-// consumes at most ONE pending request per tick. The owner must keep buffers
+// Both radio backends use these three request slots. Transport callbacks publish
+// only borrowed, stable request/response buffers. The normal radio service poll
+// consumes at most ONE request per visit, outside receive callbacks; Core0 tick
+// never parses or formats requests. The owner must keep buffers
 // intact until poll_core_result() reports completion. No heap or spin waits.
 constexpr unsigned CORE_REQUEST_SLOTS = 3;
+void service_network_requests();
 bool submit_core_request(unsigned slot, bool websocket, const char* method,
                          const char* path, const char* body, size_t length,
                          char* response, size_t capacity, uint32_t received_at);
 bool poll_core_result(unsigned slot, HttpResult& result);
 bool core_request_busy(unsigned slot);
 void abandon_core_request(unsigned slot);
-#endif
 
 // Core0 only: maintenance forces both remote and physical output to neutral.
 // Network acquire/input/heartbeat requests return 423 while it is active.

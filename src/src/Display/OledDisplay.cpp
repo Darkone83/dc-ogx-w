@@ -2,7 +2,7 @@
 // Drop-in replacement for src/Display/OledDisplay.cpp (v1.1 source package).
 // Large-text font masks are rasterized from DejaVu Sans Condensed Bold
 // (DejaVu Fonts / Bitstream Vera permissive license). Microfont is an original
-// 5x7 bitmap. No graphics library, heap allocation, or USB-core I2C work.
+// 5x7 bitmap. No graphics library or heap allocation; I2C advances without waiting.
 #include "Display/OledDisplay.h"
 #include "Display/OledGlyphs.h"
 #include "Display/OledSettings.h"
@@ -52,9 +52,9 @@ std::atomic<std::uint32_t> activity_seq{0};
 constexpr unsigned kWidth = 128;
 constexpr unsigned kHeight = 32;       // Actual panel, not a scaled 128x64 scene.
 constexpr unsigned kPages = 4;
-// Keep each Core0 I2C burst below ~0.5 ms at 400 kHz.
-// With a 5-ms service cadence, a 512-byte screen needs ~160 ms.
+// Queue fixed packets through the I2C FIFO; the service never waits for the bus.
 constexpr unsigned kBurst = 16;
+static_assert(kBurst+1<=32, "OLED packet exceeds its fixed transfer buffer");
 constexpr std::uint32_t kProbeMs = 10000;
 constexpr std::uint32_t kSplashMs = 1550;
 constexpr std::uint32_t kIpMs = 12000;
@@ -102,26 +102,95 @@ std::uint32_t next_motion = 0;
 std::uint8_t active_contrast = static_cast<std::uint8_t>(DC_OGX_OLED_FADE_ENABLED ? 8 : DC_OGX_OLED_CONTRAST);
 std::uint32_t next_contrast_step = 0;
 bool contrast_resend_pending = false;
+bool brightness_apply_pending = false;
 std::uint32_t last_external_activity = 0;
 std::uint32_t previous_settings = ~0u;
 
 bool due(std::uint32_t now, std::uint32_t at) {
     return static_cast<std::int32_t>(now - at) >= 0;
 }
-bool command(const std::uint8_t* data, std::size_t size) {
+enum class TxKind : std::uint8_t { None, Initialize, Settings, Contrast, Power, Address, Data };
+enum class TxResult : std::uint8_t { Pending, Done, Failed };
+struct Transfer {
+    TxKind kind{TxKind::None};
     std::uint8_t packet[32]{};
-    if (size > sizeof(packet) - 1) return false;
-    packet[0] = 0x00;               // SSD1306 I2C command-stream control byte.
-    std::memcpy(packet + 1, data, size);
-    return i2c_write_timeout_us(i2c1, DC_OGX_OLED_ADDRESS, packet, size + 1, false, 2500)
-        == static_cast<int>(size + 1);
+    std::uint8_t size{}, queued{}, value{};
+    std::uint32_t deadline_us{}, settings{};
+};
+Transfer tx;
+
+OledSettings::Settings decode_settings(std::uint32_t bits) {
+    OledSettings::Settings settings;
+    settings.brightness=static_cast<std::uint8_t>(bits);
+    settings.idle_brightness=static_cast<std::uint8_t>(bits>>8);
+    settings.dim_index=static_cast<std::uint8_t>((bits>>16)&15u);
+    settings.off_index=static_cast<std::uint8_t>((bits>>20)&15u);
+    settings.enabled=(bits&(1u<<24))!=0;
+    settings.invert=(bits&(1u<<25))!=0;
+    settings.flip=(bits&(1u<<26))!=0;
+    settings.fade=(bits&(1u<<27))!=0;
+    return settings;
 }
-bool send_contrast(std::uint8_t brightness) {
-    // Preserve the exact user-selected value: SSD1306 0x81 sets pixel drive
-    // current, not a gamma-corrected backlight. A separate 0xAE enforces 0%.
-    // Issue command + parameter in one transaction at a framebuffer boundary.
-    const std::uint8_t packet[] = {0x81, brightness};
-    return command(packet, sizeof(packet));
+
+TxResult advance_transfer() {
+    auto* hw=i2c_get_hw(i2c1);
+    const auto flags=hw->raw_intr_stat;
+    if ((flags&I2C_IC_RAW_INTR_STAT_TX_ABRT_BITS) || hw->tx_abrt_source) {
+        (void)hw->clr_tx_abrt;
+        return TxResult::Failed;
+    }
+    if (tx.queued==tx.size && (flags&I2C_IC_RAW_INTR_STAT_STOP_DET_BITS)) {
+        (void)hw->clr_stop_det;
+        return TxResult::Done;
+    }
+    // At most one FIFO's worth of register writes per service visit. A packet
+    // may need a later visit to queue its STOP byte; allow 2.5 ms without any
+    // FIFO progress, rather than spending that interval waiting on Core0.
+    const auto available=i2c_get_write_available(i2c1);
+    const unsigned budget=available<16u?available:16u;
+    const auto before=tx.queued;
+    for (unsigned i=0; i<budget && tx.queued<tx.size; ++i) {
+        const unsigned index=tx.queued++;
+        hw->data_cmd=tx.packet[index] |
+            (tx.queued==tx.size?I2C_IC_DATA_CMD_STOP_BITS:0u);
+    }
+    const auto now=time_us_32();
+    if (tx.queued!=before) tx.deadline_us=now+2500u;
+    else if (due(now,tx.deadline_us)) return TxResult::Failed;
+    return TxResult::Pending;
+}
+
+void start_transfer(TxKind kind,const std::uint8_t* packet,std::size_t size,
+                    std::uint8_t value=0,std::uint32_t settings=0) {
+    // All callers supply fixed command/data packets no larger than 32 bytes.
+    tx.kind=kind;
+    tx.size=static_cast<std::uint8_t>(size);
+    tx.queued=0;
+    tx.value=value;
+    tx.settings=settings;
+    std::memcpy(tx.packet,packet,size);
+    auto* hw=i2c_get_hw(i2c1);
+    hw->enable=0;
+    hw->tar=DC_OGX_OLED_ADDRESS;
+    (void)hw->clr_tx_abrt;
+    (void)hw->clr_stop_det;
+    hw->enable=1;
+    tx.deadline_us=time_us_32()+2500u;
+    // Return immediately after filling available FIFO space. Completion and
+    // controller state changes are handled on a subsequent service visit.
+    (void)advance_transfer();
+}
+
+void command(TxKind kind,const std::uint8_t* data,std::size_t size,
+             std::uint8_t value=0,std::uint32_t settings=0) {
+    std::uint8_t packet[32]{};
+    packet[0]=0x00; // SSD1306 command-stream control byte.
+    std::memcpy(packet+1,data,size);
+    start_transfer(kind,packet,size+1,value,settings);
+}
+void send_contrast(std::uint8_t brightness) {
+    const std::uint8_t packet[]={0x81,brightness};
+    command(TxKind::Contrast,packet,sizeof(packet),brightness);
 }
 void pixel(int x, int y, bool on = true) {
     if (x < 0 || y < 0 || x >= static_cast<int>(kWidth) || y >= static_cast<int>(kHeight)) return;
@@ -684,6 +753,12 @@ void draw(const NetworkService::Transport::Status& network,std::uint32_t state,
     blend_transition();
 }
 void offline(std::uint32_t now) {
+    auto* hw=i2c_get_hw(i2c1);
+    hw->enable=0;
+    (void)hw->clr_tx_abrt;
+    (void)hw->clr_stop_det;
+    tx.kind=TxKind::None;
+    bus_initialized=false; // Reset the controller/FIFOs at the next scheduled probe.
     online.store(false,std::memory_order_release);
     sent=0;
     stream_setup=transfer_pending=false;
@@ -698,9 +773,10 @@ void init_bus() {
     gpio_pull_up(DC_OGX_OLED_SCL);
     bus_initialized=true;
 }
-bool initialize() {
+void initialize() {
     init_bus();
-    const auto settings=OledSettings::get();
+    const auto bits=OledSettings::packed();
+    const auto settings=decode_settings(bits);
     const std::uint8_t first=static_cast<std::uint8_t>(settings.fade && settings.enabled && settings.brightness ? 8 : settings.brightness);
     const std::uint8_t cmds[]={
         0xae,0xd5,0x80,0xa8,0x1f,0xd3,0x00,0x40,0x8d,0x14,
@@ -709,7 +785,11 @@ bool initialize() {
         0xd9,0xf1,0xdb,0x40,0xa4,static_cast<std::uint8_t>(settings.invert?0xa7:0xa6),
         0x2e,static_cast<std::uint8_t>(settings.enabled && settings.brightness ? 0xaf : 0xae)
     };
-    if (!command(cmds,sizeof(cmds))) return false;
+    command(TxKind::Initialize,cmds,sizeof(cmds),first,bits);
+}
+void finish_initialize(const Transfer& completed) {
+    const auto settings=decode_settings(completed.settings);
+    const auto first=completed.value;
     online.store(true,std::memory_order_release);
     sent=0;
     stream_setup=transfer_pending=false;
@@ -734,10 +814,40 @@ bool initialize() {
     active_contrast=first;
     panel_on=settings.enabled && settings.brightness!=0;
     last_external_activity=0;
-    previous_settings=OledSettings::packed();
+    previous_settings=completed.settings;
     next_contrast_step=0;
     contrast_resend_pending=false;
-    return true;
+    brightness_apply_pending=false;
+}
+void finish_transfer(const Transfer& completed,std::uint32_t now) {
+    switch (completed.kind) {
+        case TxKind::Initialize: finish_initialize(completed); break;
+        case TxKind::Settings: previous_settings=completed.settings; break;
+        case TxKind::Contrast:
+            active_contrast=completed.value;
+            contrast_resend_pending=false;
+            brightness_apply_pending=false;
+            next_contrast_step=now+45u;
+            break;
+        case TxKind::Power:
+            panel_on=completed.value!=0;
+            if (!panel_on) active_contrast=0;
+            sent=0;
+            stream_setup=transfer_pending=false;
+            frame_dirty=true;
+            if (panel_on) { page=1; page_deadline=now+kIpMs; }
+            break;
+        case TxKind::Address: stream_setup=true; sent=0; break;
+        case TxKind::Data:
+            sent+=completed.size-1u;
+            if (sent==sizeof(fb)) {
+                sent=0;
+                stream_setup=false;
+                transfer_pending=false;
+            }
+            break;
+        case TxKind::None: break;
+    }
 }
 #endif // DC_OGX_OLED_ENABLED
 } // namespace
@@ -762,8 +872,22 @@ void notify(Activity event) {
     activity_posted.store((serial<<8u)|static_cast<std::uint32_t>(event),std::memory_order_release);
 }
 bool detected() { return online.load(std::memory_order_acquire); }
+void poll_transfer() {
+#if DC_OGX_OLED_ENABLED
+    if (tx.kind==TxKind::None) return;
+    const auto result=advance_transfer();
+    if (result==TxResult::Pending) return;
+    const auto now=to_ms_since_boot(get_absolute_time());
+    if (result==TxResult::Failed) { offline(now); return; }
+    const auto completed=tx;
+    tx.kind=TxKind::None;
+    finish_transfer(completed,now);
+#endif
+}
 void service(std::uint32_t now,const NetworkService::Transport::Status& network) {
 #if DC_OGX_OLED_ENABLED
+    poll_transfer();
+    if (tx.kind!=TxKind::None) return;
     const auto posted=activity_posted.load(std::memory_order_acquire);
     if (posted!=observed_activity) {
         observed_activity=posted;
@@ -784,7 +908,7 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
         }
     }
     if (!online.load(std::memory_order_acquire)) {
-        if (due(now,next_probe) && !initialize()) offline(now);
+        if (due(now,next_probe)) initialize();
         return;
     }
     const auto firmware=FirmwareUpdate::display_progress();
@@ -874,25 +998,23 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
     }
     // Apply configuration changes only at I2C frame boundaries. This avoids
     // corrupting the GDDRAM column pointer on controller-compatible clones.
-    const auto settings=OledSettings::get();
     const auto bits=OledSettings::packed();
-    bool immediate_brightness=false;
+    const auto settings=decode_settings(bits);
     if (bits!=previous_settings && !transfer_pending) {
         const auto old=previous_settings;
-        previous_settings=bits;
         last_external_activity=now;
-        // Runtime changes should respond visibly on the very next frame
-        // boundary; animated fades are for boot and automatic idle dimming.
-        immediate_brightness=((old^bits)&0x0000ffffu)!=0u ||
-                             ((old^bits)&(1u<<24))!=0u;
+        brightness_apply_pending|=((old^bits)&0x0000ffffu)!=0u ||
+                                  ((old^bits)&(1u<<24))!=0u;
+        frame_dirty=true;
         if ((old^bits)&((1u<<25)|(1u<<26))) {
             const std::uint8_t cmds[]={
                 static_cast<std::uint8_t>(settings.flip?0xa0:0xa1),
                 static_cast<std::uint8_t>(settings.flip?0xc0:0xc8),
                 static_cast<std::uint8_t>(settings.invert?0xa7:0xa6)};
-            if (!command(cmds,sizeof(cmds))) { offline(now); return; }
+            command(TxKind::Settings,cmds,sizeof(cmds),0,bits);
+            return;
         }
-        frame_dirty=true;
+        previous_settings=bits; // No orientation command is needed.
     }
     const bool timed_off=!overlay && settings.off_index &&
         due(now,last_external_activity+
@@ -906,42 +1028,29 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
     // alone can still leave pixels glowing on SSD1306-compatible panels.
     const bool want_panel_on=!should_sleep && target_contrast!=0;
     if (!transfer_pending && panel_on!=want_panel_on) {
-        if (want_panel_on) {
-            // Set the new segment current *before* enabling panel output so
-            // waking from 0% never flashes at the stale high contrast.
-            if (!send_contrast(target_contrast)) { offline(now); return; }
-            active_contrast=target_contrast;
-            contrast_resend_pending=false;
-            next_contrast_step=now+45u;
-        } else if (target_contrast==0) {
-            // Send zero current as well as DISPLAYOFF for SSD1306-compatible
-            // modules; neither behavior depends on framebuffer data content.
-            if (!send_contrast(0)) { offline(now); return; }
+        if ((want_panel_on && active_contrast!=target_contrast) ||
+            (!want_panel_on && target_contrast==0 && active_contrast!=0) ||
+            contrast_resend_pending) {
+            send_contrast(want_panel_on?target_contrast:0);
+            return;
         }
         const std::uint8_t power[]={static_cast<std::uint8_t>(want_panel_on?0xaf:0xae)};
-        if (!command(power,sizeof(power))) { offline(now); return; }
-        panel_on=want_panel_on;
-        if (!panel_on) active_contrast=0;
-        sent=0; stream_setup=transfer_pending=false;
-        frame_dirty=true;
-        if (panel_on) { page=1; page_deadline=now+kIpMs; }
+        command(TxKind::Power,power,sizeof(power),want_panel_on?1:0);
+        return;
     }
     if (!panel_on) return;
-    // For a user-initiated brightness Apply, change the drive current in a
-    // single command. Idle dim and startup retain gentle, bounded fades.
+    // Change contrast at framebuffer boundaries, and commit it only after STOP.
     if (!transfer_pending && (active_contrast!=target_contrast || contrast_resend_pending) &&
-        (immediate_brightness || contrast_resend_pending || due(now,next_contrast_step))) {
+        (brightness_apply_pending || contrast_resend_pending || due(now,next_contrast_step))) {
         constexpr unsigned kStep=24;
         const unsigned delta=active_contrast<target_contrast ?
             static_cast<unsigned>(target_contrast-active_contrast) :
             static_cast<unsigned>(active_contrast-target_contrast);
-        const unsigned step=(immediate_brightness || contrast_resend_pending)?delta:(delta<kStep?delta:kStep);
+        const unsigned step=(brightness_apply_pending || contrast_resend_pending)?delta:(delta<kStep?delta:kStep);
         const auto next=static_cast<std::uint8_t>(active_contrast<target_contrast?
             active_contrast+step:active_contrast-step);
-        if (!send_contrast(next)) { offline(now); return; }
-        active_contrast=next;
-        contrast_resend_pending=false;
-        next_contrast_step=now+45u;
+        send_contrast(next);
+        return;
     }
     // Don't advance the animation until all 512 bytes of the prior frame have
     // been transmitted. Every frame remains coherent even on a slow service loop.
@@ -968,23 +1077,14 @@ void service(std::uint32_t now,const NetworkService::Transport::Status& network)
     next_chunk=now+2u;
     if (!stream_setup) {
         const std::uint8_t addr[]={0x21,0,127,0x22,0,3};
-        if (!command(addr,sizeof(addr))) { offline(now); return; }
-        stream_setup=true;
-        sent=0;
+        command(TxKind::Address,addr,sizeof(addr));
         return;
     }
     std::uint8_t packet[kBurst+1];
     packet[0]=0x40;
     const auto count=sizeof(fb)-sent<kBurst?sizeof(fb)-sent:kBurst;
     std::memcpy(packet+1,fb+sent,count);
-    if (i2c_write_timeout_us(i2c1,DC_OGX_OLED_ADDRESS,packet,count+1,false,2500)
-        !=static_cast<int>(count+1)) { offline(now); return; }
-    sent+=count;
-    if (sent==sizeof(fb)) {
-        sent=0;
-        stream_setup=false;
-        transfer_pending=false;
-    }
+    start_transfer(TxKind::Data,packet,count+1);
 #else
     (void)now; (void)network;
 #endif
