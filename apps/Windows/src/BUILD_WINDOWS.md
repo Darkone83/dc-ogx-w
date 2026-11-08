@@ -1,61 +1,32 @@
-# DC-OGX-W Windows Companion v0.1.4
+# Building the Windows companion 0.1.5
 
-This is a **separate Windows-only Tauri 2/Rust project**. It does not modify the RP2040 firmware, the existing WebUI or the Linux/macOS Python companion.
+Required: Windows 10/11 x64, Node.js LTS, Rust stable for `x86_64-pc-windows-msvc`, Visual Studio Build Tools (Desktop development with C++, Windows SDK), and Microsoft Edge WebView2 Runtime.
 
-## Build environment
-
-- Windows 10/11 x64; Microsoft Edge **WebView2 Runtime** (usually already installed)
-- Node.js LTS (includes `npm.cmd`)
-- Rust with `stable-x86_64-pc-windows-msvc`
-- Visual Studio C++ Build Tools workload **Desktop development with C++** and Windows SDK
-
-From PowerShell in this folder:
+From PowerShell in the source folder:
 
 ```powershell
-node --version
-npm.cmd --version
-rustc --version
-cargo --version
 .\build-portable.ps1
 ```
 
-Or manually:
+The script uses `npm.cmd ci` and the checked-in Cargo lockfile. Tauri/CLI versions are pinned; the portable directory override needs Tauri 2.12 or newer. HTML/CSS/JS are embedded in the executable. No installer is generated. The output is `dist-portable\DC-OGX-W.exe` with a short README.
+
+For development or a manual build:
 
 ```powershell
-npm.cmd install
+npm.cmd ci
 npm.cmd run dev
 npm.cmd run build
 ```
 
-The build script copies the **single native executable** to `dist-portable/DC-OGX-W.exe`. No MSI/NSIS installer is created. The embedded HTML/CSS/JS is included in the EXE. WebView2 is a separate Windows runtime, **not embedded**.
+For regression checks:
 
-**Portable preferences:** Tauri is configured with `appDirectoriesOverride: "./app-data"` so WebView2 files and app preferences remain beside the EXE. The executable folder must be writable. Do not run from `Program Files` or a locked-down network share.
+```powershell
+npm.cmd run check:ui
+npm.cmd run check:core
+```
 
-## First-run checklist
+`check:core` needs Rust but not the desktop SDK. It includes actual HTTP/WebSocket transport tests on loopback. For the complete Windows project, also run `cargo test --manifest-path src-tauri/Cargo.toml --locked` with the Windows build tools installed.
 
-1. Start the application. Enter the current adapter IP or click **Discover** (both board variants with UDP-capable firmware).
-2. Confirm the firmware version, network address and mode.
-3. On Bluetooth-capable boards, switch to **Wi-Fi remote** mode before taking control. The ESP8285 variant is Wi-Fi-only.
-4. Open **Control**, select Keyboard or an XInput slot, then **Take control**. Esc or Release immediately neutralizes input.
-5. Open **LED** or **Device** to Apply session changes or **Save & restart** to make them persistent. Save is not a preview.
-6. Use **Wi-Fi** to edit SSID/hostname and restart. The adapter’s AP/STA behavior depends on its firmware; use the current IP displayed by the adapter.
+Run the finished EXE from a writable folder, not Program Files. Its neighbouring `app-data` directory holds preferences and WebView2 storage. WebView2 is a separate runtime and is not bundled in the portable EXE. Existing portable preferences remain compatible.
 
-## Native implementation
-
-- `src-tauri/src/network.rs`: exact UDP discovery wire protocol, HTTP API bridge, allowlisted routes
-- `src-tauri/src/control.rs`: WebSocket ownership, input snapshots, deadman-aware neutralization, keyboard or native XInput
-- `src-tauri/src/main.rs`: Tauri commands and local preferences storage
-- `ui/`: standalone frontend, eight original firmware WebUI themes; actual OG Xbox White/Black buttons, keyboard mapping, device panels
-- Development-only UI tests are excluded from this cleaned repository archive; keep them in a separate developer checkout if desired
-
-The firmware's remote API v2 is required. Input snapshots use the firmware's **+Y-up** convention, and 60 Hz or the board-advertised lower rate. This initial build **does not auto-reacquire ownership after a connection failure**. That is intentional: an ambiguous lost HTTP acquire response must not be replayed. After a drop, release input and manually take control again.
-
-## v0.1 scope boundaries
-
-The first build supports connection/discovery, device health, native XInput (slot 1-4) and keyboard control, key rebinding, saved profile selection, input mode switching, OLED brightness/timeouts/apply/save, RGB profile and diagnostic colors/apply/save, and Wi-Fi network configuration.
-
-The **full profile editor/remapper**, **Bluetooth calibration flow**, **firmware uploader** and advanced diagnostics are scheduled for a later version; use the embedded WebUI for those operations today. The Linux/macOS Python script has not been modified.
-
-## Verification
-
-Run `npm.cmd run build` (or `build-portable.ps1`) with Windows build tools. Then launch the EXE and test device discovery, status, keyboard/XInput, White/Black button mapping, neutral release, theme persistence and HTTP configuration on the actual adapter. This trimmed release omits the standalone UI-test command; `cargo test` remains available if you add native tests in a development checkout.
+Device smoke test: connect by IP and discovery; confirm board/version/profile; select Wi-Fi remote; try native XInput, keyboard White/Black and the Standard gamepad fallback; check both sticks and triggers; test focus loss, controller reconnect, Release, disconnect and app close. The fallback only accepts standard-mapped controllers exposed by Windows/WebView2. Configuration mode is a settings state; Physical includes USB and supported Bluetooth. Test Pico W, Pico 2 W and clone firmware as those boards become available.

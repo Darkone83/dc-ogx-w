@@ -1,13 +1,13 @@
 [package]
 name = "dc-ogx-w"
-version = "0.1.4"
+version = "0.1.5"
 description = "DC-OGX-W portable Windows companion"
 authors = ["Darkone Customs"]
 edition = "2021"
 build = "build.rs"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "=2.12.5", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2.12", default-features = false, features = ["json"] }
@@ -15,7 +15,7 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 url = "2"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "=2.7.4", features = [] }
 
 [profile.release]
 opt-level = "s"

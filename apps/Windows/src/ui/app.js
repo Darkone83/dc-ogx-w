@@ -27,7 +27,9 @@ let prefs = {theme:"darkone",lastHost:"",keyBindings:{...DEFAULT_KEYS},source:"k
 let keyBindings = {...DEFAULT_KEYS}, listening = null, pressed = new Set(), online = false,
   currentPage = "control", lastStatus = null, lastProfile = null,
   oled = null, led = null, wifi = null, currentControl = {active:false},
-  toastTimer, pollBusy = false, connectionFailures = 0, actionBusy = false;
+  toastTimer, pollBusy = false, connectionFailures = 0, actionBusy = false,
+  connectionEpoch = 0, controlPollBusy = false, sessionBusy = false, sourceBusy = false,
+  inputFocused = true, browserNeedsNeutral = true, browserMessage = "Press a button to expose your controller to Windows.";
 // On-screen controls are merged into the same protocol bits used by keyboard and XInput.
 // Original Xbox White = LB/0x0100; Black = RB/0x0200. No new firmware bits.
 const onscreenHeld = new Set();
@@ -42,18 +44,21 @@ function notify(text,error=false) {
 function inform(error) { notify(typeof error === "string" ? error : error?.message || String(error),true); }
 function setText(id,value) { $(id).textContent = val(value); }
 function setConnection(connected) {
+  if(online!==connected){connectionEpoch++;connectionFailures=0;}
   online = connected;
   $("sidebar-connection").textContent = connected ? "● Adapter connected" : "● Not connected";
   $("sidebar-connection").classList.toggle("online",connected);
-  $("top-status").textContent = connected ? "● Connected" : "● Offline";
-  $("top-status").classList.toggle("online",connected);
+  $("top-status").textContent = connected ? connectionFailures>=2?"● Status delayed":"● Connected" : "● Offline";
+  $("top-status").classList.toggle("online",connected&&connectionFailures<2);
   $("connect-button").disabled = connected || actionBusy;
   $("disconnect-button").disabled = !connected || actionBusy;
-  $("take-button").disabled = !connected || actionBusy;
+  $("take-button").disabled = !connected || actionBusy || sessionBusy || currentControl.active || currentControl.starting || currentControl.token_held;
   $("footer-connection").textContent = connected ? $("device-address").value : "DC-OGX-W · PORTABLE";
-  for (const id of ["oled-apply","oled-save"]) $(id).disabled = !connected || !oled || actionBusy;
-  for (const id of ["led-apply","led-save"]) $(id).disabled = !connected || !led || actionBusy;
+  for (const id of ["oled-apply","oled-save"]) $(id).disabled = !connected || !oled?.available || actionBusy;
+  for (const id of ["led-apply","led-save"]) $(id).disabled = !connected || !led || led.available===false || actionBusy;
   for (const id of ["wifi-save","wifi-forget","wifi-retry"]) $(id).disabled = !connected || !wifi || actionBusy;
+  for(const button of document.querySelectorAll("[data-mode]")) button.disabled = !connected || actionBusy ||
+    lastStatus?.control?.mode_pending===true || (lastStatus?.control?.physical_supported===false && button.dataset.mode!=="wifi");
   updateInteractiveAvailability();
 }
 function formatFactList(target,items) {
@@ -87,9 +92,10 @@ function updateStatus(s) {
     ["Modem timeouts",n.command_timeouts],["Radio error",n.station_error||n.error||"None"]
   ]);
   for(const button of document.querySelectorAll("[data-mode]")) button.classList.toggle("selected",button.dataset.mode===c.mode);
-  setText("mode-status",c.bluetooth_supported?`Current: ${c.mode||"?"}${c.mode_pending?" (transition pending)":""}`:
-    "Wi-Fi-only board: Bluetooth controller and Configuration modes are unavailable.");
-  for(const button of document.querySelectorAll("[data-mode]")) button.disabled = !online || (c.bluetooth_supported===false && button.dataset.mode!=="wifi");
+  const names={physical:"Physical (USB / Bluetooth)",wifi:"Wi-Fi remote",configure:"Configuration"};
+  setText("mode-status",`Current: ${names[c.mode]||c.mode||"?"}${c.mode_pending?" (transition pending)":""}`+
+    (c.bluetooth_supported===false?" · Bluetooth unavailable on this board; wired USB remains available when supported.":""));
+  setConnection(online);
 }
 async function runBusy(fn) {
   if (actionBusy) return;
@@ -109,7 +115,9 @@ async function connect() {
 }
 async function disconnect() {
   await runBusy(async()=>{
-    await invoke("disconnect_device");setConnection(false);lastStatus=null;oled=led=wifi=null;
+    resetKeyboard();
+    try{await invoke("disconnect_device");}
+    finally{setConnection(false);lastStatus=null;oled=led=wifi=null;}
     setText("stat-board","—");setText("stat-firmware","—");setText("stat-profile","—");setText("stat-input","Offline");
     notify("Disconnected. The previous controller session was released.");
   });
@@ -153,9 +161,13 @@ async function showPage(page) {
 }
 async function refreshStatus() {
   if(!online||pollBusy)return;
-  pollBusy=true;
-  try {const status=await invoke("device_api",{path:"/api/status",body:null});updateStatus(status);connectionFailures=0;}
-  catch(e){connectionFailures++;if(connectionFailures>=2) notify("Status telemetry is delayed. Check the adapter connection.",true);}
+  pollBusy=true;const epoch=connectionEpoch;
+  try {const status=await invoke("device_api",{path:"/api/status",body:null});
+    if(!online||epoch!==connectionEpoch)return;
+    connectionFailures=0;updateStatus(status);}
+  catch(e){if(online&&epoch===connectionEpoch){connectionFailures++;
+    if(connectionFailures>=2){setText("top-status","● Status delayed");$("top-status").classList.remove("online");
+      if(connectionFailures===2)notify("Status telemetry is delayed. Check the adapter connection.",true);}}}
   finally{pollBusy=false;}
 }
 
@@ -269,13 +281,14 @@ function wireOnscreenControls() {
   }
 }
 async function takeControl() {
-  if(!online||actionBusy)return;
+  if(!online||actionBusy||sessionBusy||sourceBusy||currentControl.starting||currentControl.token_held)return;
+  sessionBusy=true;setConnection(online);
   try {
-    resetKeyboard();await invoke("set_input_source",{source:$("control-source").value,slot:Number($("gamepad-slot").value)});
+    await resetKeyboard();await invoke("set_input_source",{source:$("control-source").value,slot:Number($("gamepad-slot").value)});
     await invoke("take_control");
     if(document.activeElement instanceof HTMLButtonElement) document.activeElement.blur();
     notify("Controller session acquired. Press Esc to release.");
-  } catch(e) { inform(e); }
+  } catch(e) { inform(e); } finally{sessionBusy=false;}
   await refreshControl();
 }
 async function releaseControl(show=true) {
@@ -285,24 +298,33 @@ async function releaseControl(show=true) {
   await refreshControl();
 }
 async function refreshControl() {
+  if(controlPollBusy)return;
+  controlPollBusy=true;
   try {
     const data=await invoke("control_status");currentControl=data;
     const active=data.active===true;
-    $("take-button").disabled=!online||active||actionBusy;
-    $("release-button").disabled=!active;
-    setText("control-tag",active?"● Owned":data.token_held?"Releasing":"Released");
+    $("take-button").disabled=!online||active||actionBusy||sessionBusy||sourceBusy||data.starting||data.token_held;
+    $("release-button").disabled=!active&&!data.starting;
+    $("gamepad-slot").disabled=$("control-source").value==="keyboard"||sourceBusy;
+    setText("control-tag",active?"● Owned":data.starting?"Starting…":data.token_held?"Releasing…":"Released");
     showPad(data.last_sent||NEUTRAL());
     updateInteractiveAvailability();
+    const sourceName={gamepad:"Native XInput",browser:"Standard gamepad",keyboard:"Keyboard + on-screen"}[data.source];
     $("control-message").textContent=active
-      ? `Controller active · ${data.source==="gamepad"?"XInput":"Keyboard + on-screen"}. F8 or Esc releases.`
-      : online?"Connected. Take control to use keyboard, on-screen buttons or XInput.":"Connect to an adapter to take control.";
+      ? !data.focused?"Input paused while the app is unfocused. Centre controls before resuming."
+        : data.source==="gamepad"&&data.gamepad_connected===false?"No XInput controller in this slot. Check the slot or choose Standard gamepad."
+        : data.source==="browser"&&browserMessage?browserMessage
+        : data.needs_neutral?"Centre sticks and release all controls to begin."
+        : `Controller active · ${sourceName}. F8 or Esc releases.`
+      : data.starting?"Starting a controller session…":data.token_held?"Sending neutral and releasing ownership…"
+      : online?"Connected. Take control to use keyboard or a PC controller.":"Connect to an adapter to take control.";
     if(data.error&&!active&&data.error!==refreshControl.previousError) notify(data.error,true);
     refreshControl.previousError=data.error;
-  } catch(e){ /* App may be closing. */ }
+  } catch(e){ /* App may be closing. */ } finally{controlPollBusy=false;}
 }
 function resetKeyboard(){
-  pressed.clear();resetOnscreen();
-  if(currentControl.source==="keyboard")void invoke("set_keyboard_input",{input:NEUTRAL()}).catch(()=>{});
+  pressed.clear();resetOnscreen();browserNeedsNeutral=true;
+  return queueInput(NEUTRAL());
 }
 function buildKeyboardState() {
   const has=action=>onscreenHeld.has(action)||Boolean(keyBindings[action]&&pressed.has(keyBindings[action]));
@@ -316,11 +338,51 @@ function buildKeyboardState() {
     rx:onscreenAxes.rx||axis("rx_pos","rx_neg"), ry:onscreenAxes.ry||axis("ry_pos","ry_neg"),
     lt:Math.max(onscreenTriggers.lt,has("lt")?255:0),rt:Math.max(onscreenTriggers.rt,has("rt")?255:0)};
 }
-let inputChain=Promise.resolve();
+let pendingInput=null,inputFlight=null;
+function queueInput(snapshot){
+  // At most one IPC in flight plus the newest snapshot. Release replaces held input.
+  pendingInput=snapshot;
+  if(!inputFlight)inputFlight=(async()=>{
+    while(pendingInput){const input=pendingInput;pendingInput=null;
+      try{await invoke("set_keyboard_input",{input});}catch(e){pendingInput=null;}}
+  })().finally(()=>{inputFlight=null;if(pendingInput)void queueInput(pendingInput);});
+  return inputFlight;
+}
 function pushKeyboard() {
-  if(!currentControl.active||$("control-source").value!=="keyboard")return;
-  const snapshot=buildKeyboardState();
-  inputChain=inputChain.then(()=>invoke("set_keyboard_input",{input:snapshot})).catch(()=>{});
+  if(!inputFocused||sourceBusy||!currentControl.active||$("control-source").value!=="keyboard")return;
+  void queueInput(buildKeyboardState());
+}
+function standardPad(gamepad){
+  const p=NEUTRAL(),pressed=i=>Boolean(gamepad.buttons[i]?.pressed);
+  for(const [index,bit] of [[0,1],[1,2],[2,4],[3,8],[4,256],[5,512],[8,64],[9,128],[10,16],[11,32],[16,1024]])
+    if(pressed(index))p.buttons|=bit;
+  for(const [index,bit] of [[12,1],[13,2],[14,4],[15,8]])if(pressed(index))p.dpad|=bit;
+  if((p.dpad&3)===3)p.dpad&=~3;if((p.dpad&12)===12)p.dpad&=~12;
+  const clamp=(n,min,max)=>Number.isFinite(n)?Math.max(min,Math.min(max,n)):0;
+  const axis=n=>Math.round(clamp(n,-1,1)*(n<0?32768:32767));
+  [p.lx,p.ly,p.rx,p.ry]=[axis(gamepad.axes[0]),axis(-gamepad.axes[1]),axis(gamepad.axes[2]),axis(-gamepad.axes[3])];
+  p.lt=Math.round(clamp(gamepad.buttons[6]?.value,0,1)*255);p.rt=Math.round(clamp(gamepad.buttons[7]?.value,0,1)*255);
+  return p;
+}
+function centred(p){return !p.buttons&&!p.dpad&&p.lt<=8&&p.rt<=8&&[p.lx,p.ly,p.rx,p.ry].every(n=>Math.abs(n)<=4096);}
+function pollGamepad(){
+  if(sourceBusy||!currentControl.active||!inputFocused||document.hidden||currentPage!=="control"||$("control-source").value!=="browser")return;
+  let pad;try{pad=navigator.getGamepads?.()[Number($("gamepad-slot").value)];}catch(e){/* Runtime may deny gamepad access. */}
+  if(!pad?.connected||pad.mapping!=="standard"){
+    browserNeedsNeutral=true;browserMessage=pad?"This controller has no standard mapping. Use XInput or a Windows mapping tool.":"No standard gamepad in this slot. Press a controller button, then check the slot.";
+    void queueInput(NEUTRAL());return;
+  }
+  const p=standardPad(pad);
+  if(browserNeedsNeutral){if(centred(p))browserNeedsNeutral=false;
+    browserMessage=browserNeedsNeutral?"Centre sticks and release all controls to begin.":"";void queueInput(NEUTRAL());return;}
+  browserMessage="";void queueInput(p);
+}
+async function changeSource(){
+  if(sourceBusy)return;sourceBusy=true;
+  $("control-source").disabled=true;$("gamepad-slot").disabled=true;
+  try{await resetKeyboard();prefs.source=$("control-source").value;prefs.slot=Number($("gamepad-slot").value);
+    await invoke("set_input_source",{source:prefs.source,slot:prefs.slot});await savePrefs();}
+  catch(e){inform(e);}finally{sourceBusy=false;$("control-source").disabled=false;await refreshControl();}
 }
 function keyLabel(code){return code==null?"Unassigned":code.startsWith("Key")?code.slice(3):code.startsWith("Digit")?code.slice(5):code;}
 function validKey(code){return /^(Key[A-Z]|Digit[0-9]|Numpad[0-9]|Arrow(Up|Down|Left|Right)|Space|Enter|Backspace|Minus|Equal|BracketLeft|BracketRight|Semicolon|Quote|Comma|Period|Slash|Backslash|Backquote)$/.test(code);}
@@ -361,8 +423,10 @@ function keyDown(ev) {
 function keyUp(ev){if(pressed.delete(ev.code)){ev.preventDefault();pushKeyboard();}}
 
 async function loadProfiles() {
+  if(!online)return;const epoch=connectionEpoch;
   try {
     const data=await invoke("device_api",{path:"/api/profiles",body:null});
+    if(!online||epoch!==connectionEpoch)return;
     const list=$("profile-list");list.replaceChildren();
     for(const profile of data.profiles||[]){
       const button=document.createElement("button"),title=document.createElement("strong"),desc=document.createElement("span");
@@ -376,11 +440,11 @@ async function loadProfiles() {
         catch(e){inform(e);}
       });list.append(button);
     }
-  }catch(e){inform(e);}
+  }catch(e){if(online&&epoch===connectionEpoch)inform(e);}
 }
 async function changeMode(mode) {
   if(!online)return;
-  if(lastStatus?.control?.bluetooth_supported===false&&mode!=="wifi")return;
+  if(lastStatus?.control?.physical_supported===false&&mode!=="wifi")return;
   await runBusy(async()=>{await releaseControl(false);
     await invoke("device_api",{path:"/api/control/mode",body:{mode}});
     notify("Mode change requested. Wait for the adapter to finish transitioning.");
@@ -390,9 +454,10 @@ async function changeMode(mode) {
 function percent(raw){return Math.round(Number(raw)/255*100)+"%";}
 function updateRangeLabels(){setText("oled-bright-label",percent($("oled-bright").value));setText("oled-idle-label",percent($("oled-idle").value));setText("led-bright-label",percent($("led-bright").value));}
 async function loadOled() {
-  if(!online)return;
+  if(!online)return;const epoch=connectionEpoch;
   try{
-    oled=await invoke("device_api",{path:"/api/oled",body:null});
+    const data=await invoke("device_api",{path:"/api/oled",body:null});
+    if(!online||epoch!==connectionEpoch)return;oled=data;
     $("oled-enabled").checked=Boolean(oled.enabled);$("oled-bright").value=oled.brightness;
     $("oled-idle").value=oled.idle_brightness;$("oled-dim").value=oled.dim_after_s;
     $("oled-off").value=oled.off_after_s;$("oled-invert").checked=Boolean(oled.invert);
@@ -400,7 +465,7 @@ async function loadOled() {
     $("oled-note").textContent=oled.available?"Apply is temporary. Save & restart writes persistent settings.":"OLED is not enabled in this firmware build.";
     for(const id of ["oled-apply","oled-save"])$(id).disabled=!oled.available;
     updateRangeLabels();
-  }catch(e){oled=null;inform(e);}
+  }catch(e){if(online&&epoch===connectionEpoch){oled=null;inform(e);}}
 }
 function collectOled(){
   const dim=Number($("oled-dim").value),off=Number($("oled-off").value);
@@ -415,6 +480,7 @@ async function sendConfig(kind,action,payload) {
   await runBusy(async()=>{
     await releaseControl(false);
     await invoke("device_api",{path:`/api/${kind}/${action}`,body:payload});
+    if(action==="save")setConnection(false);
     notify(action==="save"?"Settings saved; adapter restarting. Reconnect after boot.":"Settings applied for this session.");
   });
 }
@@ -424,9 +490,10 @@ function makeColorField(name,id,value){
   input.id=id;span.textContent=name;row.append(input,span);return row;
 }
 async function loadLed() {
-  if(!online)return;
+  if(!online)return;const epoch=connectionEpoch;
   try{
-    led=await invoke("device_api",{path:"/api/led",body:null});
+    const data=await invoke("device_api",{path:"/api/led",body:null});
+    if(!online||epoch!==connectionEpoch)return;led=data;
     $("led-enabled").checked=Boolean(led.enabled);$("led-bright").value=led.brightness;
     $("led-mode").value=led.mode;
     const profiles=$("led-profile-colors"),diagnostics=$("led-diag-colors");profiles.replaceChildren();diagnostics.replaceChildren();
@@ -435,7 +502,7 @@ async function loadLed() {
     $("led-note").textContent=led.available===false?"RGB LED unavailable in this build.":"Apply to preview. Save & restart to retain settings.";
     for(const id of ["led-apply","led-save"])$(id).disabled=led.available===false;
     updateRangeLabels();
-  }catch(e){led=null;inform(e);}
+  }catch(e){if(online&&epoch===connectionEpoch){led=null;inform(e);}}
 }
 function collectLed(){
   if(!led)throw Error("Load LED settings first.");
@@ -444,16 +511,17 @@ function collectLed(){
     diagnostic_colors:Object.fromEntries(Object.keys(led.diagnostic_colors||{}).map(k=>[k,$("led-diag-"+k).value.toUpperCase()]))};
 }
 async function loadWifi() {
-  if(!online)return;
+  if(!online)return;const epoch=connectionEpoch;
   try{
-    wifi=await invoke("device_api",{path:"/api/network/config",body:null});
+    const data=await invoke("device_api",{path:"/api/network/config",body:null});
+    if(!online||epoch!==connectionEpoch)return;wifi=data;
     $("wifi-enabled").checked=Boolean(wifi.station_enabled||!wifi.station_ssid);
     $("wifi-ssid").value=wifi.station_ssid||"";$("wifi-password").value="";
     $("wifi-hostname").value=wifi.hostname||"dc-ogx-w";
     $("wifi-open").checked=Boolean(wifi.station_enabled&&wifi.station_ssid&&!wifi.password_saved);
     $("wifi-note").textContent="Changes restart the adapter. After a successful station join, the recovery AP shuts down.";
     for(const id of ["wifi-save","wifi-forget","wifi-retry"])$(id).disabled=false;
-  }catch(e){wifi=null;inform(e);}
+  }catch(e){if(online&&epoch===connectionEpoch){wifi=null;inform(e);}}
 }
 async function saveWifi(forget=false){
   if(!online||!wifi)return;
@@ -471,6 +539,7 @@ async function saveWifi(forget=false){
   if(!confirm(forget?"Forget the saved network and restart the adapter?":"Save Wi-Fi settings and restart the adapter?"))return;
   await runBusy(async()=>{await releaseControl(false);
     await invoke("device_api",{path:"/api/network/config",body});
+    setConnection(false);
     $("wifi-password").value="";notify("Network settings queued. Reconnect to the new address after restart.");
   });
 }
@@ -493,7 +562,7 @@ async function loadPrefs(){
   $("device-address").value=prefs.lastHost||"192.168.4.1";
   document.documentElement.dataset.theme=THEMES.includes(prefs.theme)?prefs.theme:"darkone";
   $("theme-select").value=document.documentElement.dataset.theme;
-  $("control-source").value=prefs.source==="gamepad"?"gamepad":"keyboard";
+  $("control-source").value=["gamepad","browser"].includes(prefs.source)?prefs.source:"keyboard";
   $("gamepad-slot").value=String([0,1,2,3].includes(Number(prefs.slot))?prefs.slot:0);
   renderKeymap();
 }
@@ -509,13 +578,13 @@ function wire() {
   wireOnscreenControls();
   $("take-button").addEventListener("click",()=>void takeControl());
   $("release-button").addEventListener("click",()=>void releaseControl());
-  $("control-source").addEventListener("change",async()=>{resetKeyboard();prefs.source=$("control-source").value;await savePrefs();try{await invoke("set_input_source",{source:prefs.source,slot:Number($("gamepad-slot").value)});}catch(e){inform(e);}});
-  $("gamepad-slot").addEventListener("change",async()=>{prefs.slot=Number($("gamepad-slot").value);await savePrefs();try{await invoke("set_input_source",{source:$("control-source").value,slot:prefs.slot});}catch(e){inform(e);}});
+  $("control-source").addEventListener("change",()=>void changeSource());
+  $("gamepad-slot").addEventListener("change",()=>void changeSource());
   $("reset-keys").addEventListener("click",()=>{if(confirm("Reset keyboard mapping to defaults?")){keyBindings={...DEFAULT_KEYS};prefs.keyBindings={...keyBindings};renderKeymap();void savePrefs();}});
   window.addEventListener("keydown",keyDown);window.addEventListener("keyup",keyUp);
-  window.addEventListener("blur",()=>{resetKeyboard();void invoke("set_input_focus",{focused:false});});
-  window.addEventListener("focus",()=>void invoke("set_input_focus",{focused:true}));
-  document.addEventListener("visibilitychange",()=>{resetKeyboard();void invoke("set_input_focus",{focused:!document.hidden});});
+  window.addEventListener("blur",()=>{inputFocused=false;resetKeyboard();void invoke("set_input_focus",{focused:false}).catch(()=>{});});
+  window.addEventListener("focus",()=>{inputFocused=!document.hidden;void invoke("set_input_focus",{focused:inputFocused}).catch(()=>{});});
+  document.addEventListener("visibilitychange",()=>{inputFocused=!document.hidden&&document.hasFocus();resetKeyboard();void invoke("set_input_focus",{focused:inputFocused}).catch(()=>{});});
   for(const b of document.querySelectorAll("[data-mode]"))b.addEventListener("click",()=>void changeMode(b.dataset.mode));
   $("reload-profiles").addEventListener("click",()=>void loadProfiles());
   for(const id of ["oled-bright","oled-idle","led-bright"])$(id).addEventListener("input",updateRangeLabels);
@@ -534,6 +603,7 @@ function wire() {
 async function boot(){wire();await loadPrefs();await refreshControl();
   setInterval(()=>{if(online&&!pollBusy&&!actionBusy&&!currentControl.active)void refreshStatus();},6500);
   setInterval(()=>void refreshControl(),320);
+  setInterval(pollGamepad,16);
   setConnection(false);notify("Portable companion ready. Connect to your adapter.");
 }
 void boot();

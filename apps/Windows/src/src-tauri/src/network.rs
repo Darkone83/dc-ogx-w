@@ -80,6 +80,8 @@ fn request_once(base: &str, path: &str, payload: Option<&Value>) -> Result<Value
         return Err(RequestError { status: 400, code: "unsupported_route".into(), detail: "Unsupported device route".into() });
     }
     let agent = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(6))
         .timeout_connect(Duration::from_secs(2))
         .timeout_read(Duration::from_secs(5))
         .timeout_write(Duration::from_secs(3))
@@ -170,8 +172,9 @@ pub fn discover() -> Result<Vec<FoundDevice>, String> {
     while start.elapsed() < Duration::from_millis(6200) {
         if !found.is_empty() && start.elapsed() >= Duration::from_millis(1900) { break; }
         if Instant::now() >= next_probe {
-            probes.send_to(PROBE, ("255.255.255.255", DISCOVERY_PORT))
-                .map_err(|e| format!("Unable to broadcast discovery: {e}"))?;
+            // A blocked broadcast must not discard legacy beacons arriving on
+            // the separate listener (VPNs and multiple interfaces can do this).
+            let _ = probes.send_to(PROBE, ("255.255.255.255", DISCOVERY_PORT));
             next_probe = Instant::now() + Duration::from_millis(450);
         }
         if let Ok((len, source)) = probes.recv_from(&mut buf) {

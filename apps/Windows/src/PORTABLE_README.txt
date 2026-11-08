@@ -1,17 +1,19 @@
-DC-OGX-W Windows Companion - Portable Edition v0.1.3
-====================================================
+DC-OGX-W Windows Companion - Portable Edition 0.1.5
+
 Run DC-OGX-W.exe from a writable folder on Windows 10/11 x64.
-Microsoft Edge WebView2 Runtime is required; it is usually already installed.
-No Python, Node.js or Rust installation is required to run the finished EXE.
+Microsoft Edge WebView2 Runtime is required. Node/Rust are build tools only.
+Keep the app-data folder next to the EXE when updating or moving it.
 
-The app creates an app-data folder next to its executable for local UI preferences
-and WebView2 storage. Keep this folder if you move the EXE to another location.
+Discover uses UDP port 38473; manual IP entry works when discovery is blocked.
+Connect to compatible Remote API v2 firmware, select Wi-Fi remote, then take
+control. Keyboard/on-screen, native XInput and Standard gamepad are available.
+The latter depends on a standard mapping exposed by Windows and WebView2.
+Press a controller button to expose it, then select its slot.
 
-Device discovery uses UDP port 38473 on official Pico W and ESP8285
-Pico W-2023 boards when their firmware includes UDP discovery. Manual IP entry
-remains available as a fallback. Network mode must be Wi-Fi remote
-before taking control. The XInput path supports 4 controller indices.
+Centre sticks and release controls before starting or resuming. Focus loss
+neutralizes input. Esc, F8 or Release stops control. Ownership is not acquired
+automatically after a connection failure.
 
-The desktop v0.1.3 is an initial test build: controller sessions, saved-profile
-selection, OLED/RGB settings, and Wi-Fi configuration are supported. Full
-profile editing, calibration, and firmware uploads remain in the firmware WebUI.
+Physical mode supports wired USB and available Bluetooth; Configuration is for
+settings/calibration with neutral console output. Use the firmware WebUI for
+full profile editing, calibration and firmware uploads.

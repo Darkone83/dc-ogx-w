@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""DC-OGX-W remote: PySide6 desktop, web bridge, CLI and asyncio API.
+"""dc-ogx-w PC companion, command line, and asynchronous Python API.
 
-Direct launches detect missing dependencies and install into a local virtual
-environment. Importing this module never installs packages. +Y is up.
+Install requirements.txt in a Python virtual environment before running this tool.
+Inputs are complete snapshots; +Y is up. No global keyboard hook is installed.
 """
 from __future__ import annotations
 
@@ -19,12 +19,6 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 import webbrowser
-
-# Install missing desktop dependencies only for an explicit program launch.
-# Module consumers (and the test suite) are never subject to package installs.
-if __name__ == "__main__":
-    from ogx_bootstrap import ensure_and_exec
-    ensure_and_exec(sys.argv[1:])
 
 try:
     import aiohttp
@@ -43,6 +37,7 @@ API_PATHS = {"/api/status", "/api/network", "/api/network/config", "/api/network
              "/api/led", "/api/led/apply", "/api/led/save", "/api/led/test",
              "/api/control/acquire", "/api/control/release", "/api/control/heartbeat",
              "/api/control/mode", "/api/calibration",
+             "/api/oled", "/api/oled/apply", "/api/oled/save",
              "/api/update", "/api/update/begin", "/api/update/chunk",
              "/api/update/finish", "/api/update/install", "/api/update/cancel"}
 DEFAULT_HOST = "192.168.4.1"
@@ -198,10 +193,16 @@ class RemoteClient:
             for attempt in range(4):
                 try:
                     async with self._session().request(
-                        "GET" if body is None else "POST", self.url + path, json=body
+                        "GET" if body is None else "POST", self.url + path, json=body, allow_redirects=False
                     ) as response:
                         try:
-                            data = await response.json(content_type=None)
+                            chunks, size = [], 0
+                            async for chunk in response.content.iter_chunked(8192):
+                                size += len(chunk)
+                                if size > 65536:
+                                    raise RemoteError("Adapter response is too large")
+                                chunks.append(chunk)
+                            data = json.loads(b"".join(chunks))
                         except (ValueError, aiohttp.ContentTypeError):
                             raise RemoteError(f"Unreadable response from {path}") from None
                         if not isinstance(data, dict):
@@ -214,7 +215,7 @@ class RemoteClient:
                                        else str(data.get("error") or data.get("message") or f"Request failed ({response.status})"))
                             error = RemoteError(message,
                                                 code=data.get("error"), status=response.status)
-                            if response.status == 503 and data.get("error") == "service_busy" and attempt < 3:
+                            if response.status == 503 and data.get("error") in ("service_busy", "led_busy") and attempt < 3:
                                 await asyncio.sleep(.1 * (attempt + 1))
                                 continue
                             raise error
@@ -315,7 +316,7 @@ class RemoteClient:
             if self.owner_timeout_ms or self._ping_supported:
                 self._heartbeat = asyncio.create_task(self._keep_owner())
             return result
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
             known_neutral_failure = (_resume and granted_token is not None and
                                      isinstance(error, RemoteError) and error.code == "control_connection_failed")
             explicit_setup_rejection = isinstance(error, RemoteError) and error.code == "network_initializing"
@@ -763,204 +764,9 @@ def keyboard_state(pressed, pg) -> PadState:
 
 
 async def desktop(host: str, *, port: int = 8765, rate: int = DEFAULT_RATE) -> None:
-    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
-    try:
-        import pygame as pg
-        from pygame._sdl2 import controller as pads
-    except ImportError:
-        raise RemoteError("The controller window needs pygame. Install this directory's requirements.txt first.") from None
-    pg.display.init()
-    pg.font.init()
-    pads.init()
-    window = pg.display.set_mode((900, 670))
-    pg.display.set_caption("dc-ogx-w · Controller workbench")
-    font = pg.font.SysFont("Segoe UI", 18)
-    small = pg.font.SysFont("Segoe UI", 14)
-    heading = pg.font.SysFont("Segoe UI", 31, bold=True)
-    colors = {"bg": (11, 18, 16), "surface": (18, 31, 25), "line": (44, 66, 53),
-              "text": (231, 245, 235), "muted": (157, 183, 166), "green": (167, 237, 99),
-              "teal": (84, 212, 186), "red": (255, 155, 151)}
-    buttons = {"acquire": pg.Rect(40, 140, 180, 44), "release": pg.Rect(230, 140, 115, 44),
-               "source": pg.Rect(365, 140, 210, 44), "browser": pg.Rect(595, 140, 150, 44),
-               "next": pg.Rect(755, 140, 105, 44)}
-    current = None
-    current_index = -1
-    source = "keyboard"
-    state = PadState()
-    status_text = "Ready. Take control to send keyboard input."
-    error = False
-    connected_name = "No supported PC gamepad detected"
-    gateway = None
-    running = True
-    focused = True
-    last_scan = 0.0
-
-    def scan(next_controller=False):
-        nonlocal current, current_index, connected_name
-        available = [i for i in range(pads.get_count()) if pads.is_controller(i)]
-        if not next_controller and current is not None and current.attached():
-            return
-        if current is not None:
-            current.quit()
-            current = None
-        if available:
-            index = available[0]
-            if next_controller and current_index in available:
-                index = available[(available.index(current_index) + 1) % len(available)]
-            current_index = index
-            current = pads.Controller(index)
-            connected_name = current.name
-        else:
-            current_index = -1
-            connected_name = "No supported PC gamepad detected"
-
-    def text(value, x, y, color="text", use_font=None):
-        window.blit((use_font or font).render(str(value), True, colors[color]), (x, y))
-
-    def wrap(value, x, y, max_width, color="muted"):
-        line = ""
-        for word in value.split():
-            candidate = line + (" " if line else "") + word
-            if small.size(candidate)[0] > max_width and line:
-                text(line, x, y, color, small)
-                y += 21
-                line = word
-            else:
-                line = candidate
-        text(line, x, y, color, small)
-
-    async with RemoteClient(host, reconnect=True) as client:
-        try:
-            while running:
-                start = time.monotonic()
-                if start - last_scan > 1:
-                    scan()
-                    last_scan = start
-                for event in pg.event.get():
-                    action = None
-                    if event.type == pg.QUIT:
-                        running = False
-                    elif event.type == pg.WINDOWFOCUSLOST:
-                        focused = False
-                        if client.control_requested or client.token is not None:
-                            await client.release()
-                            state = PadState()
-                            status_text = "Control released while the window is out of focus."
-                    elif event.type == pg.WINDOWFOCUSGAINED:
-                        focused = True
-                    elif event.type == pg.KEYDOWN:
-                        if event.key == pg.K_ESCAPE:
-                            action = "release"
-                        elif event.key == pg.K_F8:
-                            action = "release" if client.token is not None or client.control_requested else "acquire"
-                    elif event.type == pg.MOUSEBUTTONUP and event.button == 1:
-                        action = next((key for key, rect in buttons.items() if rect.collidepoint(event.pos)), None)
-                    if action:
-                        try:
-                            if action == "acquire" and client.token is None:
-                                if source == "gamepad" and current is None:
-                                    raise RemoteError("Connect a supported controller, or choose keyboard input.")
-                                await client.acquire("python-desktop")
-                                status_text = "You have control. Esc releases; F8 toggles control."
-                            elif action == "release":
-                                await client.release()
-                                state = PadState()
-                                status_text = "Control released."
-                            elif action == "source":
-                                await client.release()
-                                state = PadState()
-                                source = "gamepad" if source == "keyboard" else "keyboard"
-                                status_text = "Input source changed. Take control when ready."
-                            elif action == "next":
-                                await client.release()
-                                state = PadState()
-                                scan(True)
-                                status_text = "PC controller selected. Take control when ready."
-                            elif action == "browser":
-                                await client.release()
-                                state = PadState()
-                                if gateway is None:
-                                    gateway = await start_gateway(host, port)
-                                webbrowser.open(f"http://127.0.0.1:{port}/")
-                                status_text = "Browser controls opened. Keep this companion running."
-                            error = False
-                        except (RemoteError, aiohttp.ClientError, OSError, ValueError) as exc:
-                            status_text = str(exc)
-                            error = True
-                if client.reconnecting:
-                    state = PadState()
-                    status_text, error = "Reconnecting Wi-Fi control. Input stays neutral; release all controls before resuming.", False
-                elif client.token is not None:
-                    try:
-                        if not focused:
-                            await client.release()
-                            state = PadState()
-                        elif source == "gamepad":
-                            if current is None or not current.attached():
-                                raise RemoteError("PC controller disconnected. Control released.")
-                            state = sdl_state(current, pg)
-                            await client.send(state)
-                        else:
-                            state = keyboard_state(pg.key.get_pressed(), pg)
-                            await client.send(state)
-                    except (RemoteError, pg.error, ValueError) as exc:
-                        await client.release()
-                        state = PadState()
-                        status_text, error = str(exc), True
-
-                if client.needs_neutral and client.token is not None:
-                    status_text = "Connected. Release buttons and centre the sticks to resume input."
-                elif client.token is not None and status_text.startswith(("Reconnecting", "Connected. Release")):
-                    status_text = "You have control. Esc releases; F8 toggles control."
-                elif client.token is None and not client.reconnecting and status_text.startswith("Reconnecting"):
-                    status_text, error = (client._connection_error or "Connection recovery stopped") + ". Take control again when ready.", True
-                window.fill(colors["bg"])
-                text("dc-ogx-w", 40, 25, use_font=heading)
-                text("CONTROLLER WORKBENCH", 42, 67, "teal", small)
-                text(device_url(host), 40, 100, "muted", small)
-                text("RECONNECTING" if client.reconnecting else "REMOTE ACTIVE" if client.token is not None else "RELEASED", 690, 43,
-                     "green" if client.token is not None else "muted", small)
-                labels = {"acquire": "Take control · F8", "release": "Release", "source": "Input: " + source.title(),
-                          "browser": "Open browser", "next": "Next pad"}
-                for key, rect in buttons.items():
-                    primary = key == "acquire" and client.token is None
-                    pg.draw.rect(window, colors["green"] if primary else colors["surface"], rect, border_radius=9)
-                    pg.draw.rect(window, colors["line"], rect, 1, border_radius=9)
-                    label = small.render(labels[key], True, colors["bg"] if primary else colors["text"])
-                    window.blit(label, label.get_rect(center=rect.center))
-                wrap(status_text, 40, 200, 815, "red" if error else "green" if client.token is not None else "muted")
-                pg.draw.rect(window, colors["surface"], (40, 250, 820, 190), border_radius=15)
-                for x, key in ((160, "l"), (370, "r")):
-                    center = (x, 334)
-                    pg.draw.circle(window, colors["line"], center, 56, 1)
-                    pg.draw.line(window, colors["line"], (x - 56, 334), (x + 56, 334))
-                    pg.draw.line(window, colors["line"], (x, 278), (x, 390))
-                    point = (x + round(getattr(state, key + "x") / 32768 * 45),
-                             334 - round(getattr(state, key + "y") / 32768 * 45))
-                    pg.draw.circle(window, colors["green"], point, 10)
-                    text(("Left" if key == "l" else "Right") + " stick", x - 36, 399, "muted", small)
-                text(f"LT  {state.lt:3d}       RT  {state.rt:3d}", 535, 282, "teal")
-                active_buttons = [name.upper() for name, bit in BUTTONS.items() if state.buttons & bit]
-                active_buttons += [name.title() for name, bit in DPAD.items() if state.dpad & bit]
-                wrap(" · ".join(active_buttons) or "No buttons pressed", 535, 326, 285)
-                wrap(connected_name, 535, 382, 285)
-                text("Keyboard", 40, 460)
-                rows = ["W A S D  Left stick        I J K L  Right stick        Arrow keys  D-pad",
-                        "Space / E / Q / R  A / B / X / Y        Z / C  LB / RB        1 / 2  LT / RT",
-                        "Enter  Start        Backspace  Back        F / G  Stick clicks        Esc  Release"]
-                for i, row in enumerate(rows):
-                    text(row, 40, 494 + i * 26, "muted", small)
-                text("Input stops on focus loss. The browser page also includes profiles and button mapping.",
-                     40, 605, "muted", small)
-                pg.display.flip()
-                await asyncio.sleep(max(0, 1 / min(rate, client.input_hz) - (time.monotonic() - start)))
-        finally:
-            if gateway is not None:
-                await gateway.cleanup()
-            if current is not None:
-                current.quit()
-            pads.quit()
-            pg.quit()
+    """Compatibility entry point; the Qt event loop runs on the caller's main thread."""
+    from ogx_desktop import run_desktop
+    run_desktop(host, port=port, rate=rate)
 
 
 def json_file(path: str) -> Any:
@@ -975,13 +781,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=DEFAULT_HOST, help="adapter address (default: %(default)s)")
     parser.add_argument("--prompt-host", action="store_true", help="ask for the adapter IP/name before starting")
     commands = parser.add_subparsers(dest="command")
-    gui = commands.add_parser("desktop", help="PySide6 keyboard and PC-controller window (default)")
+    gui = commands.add_parser("desktop", help="keyboard and PC-controller window (default)")
     gui.add_argument("--port", type=int, default=8765, help="localhost browser port")
     gui.add_argument("--rate", type=int, choices=range(10, 126), default=60, metavar="10..125",
                      help="requested rate, capped to the board's advertised input rate (default: 60)")
-    sdl = commands.add_parser("desktop-sdl", help="legacy pygame controller window")
-    sdl.add_argument("--port", type=int, default=8765)
-    sdl.add_argument("--rate", type=int, default=60)
     browser = commands.add_parser("web", help="open the browser UI on localhost, enabling Gamepad API")
     browser.add_argument("--port", type=int, default=8765)
     browser.add_argument("--no-open", action="store_true")
@@ -1012,7 +815,7 @@ async def async_main(args) -> None:
         entered = input(f"Adapter IP or local name [{args.host}]: ").strip()
         args.host = device_url(entered or args.host)
     command = args.command or "desktop"
-    if command == "desktop-sdl":
+    if command == "desktop":
         await desktop(args.host, port=getattr(args, "port", 8765), rate=getattr(args, "rate", 60))
         return
     if command == "web":
@@ -1070,13 +873,15 @@ async def async_main(args) -> None:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        if args.prompt_host:
-            entered = input(f"Adapter IP or local name [{args.host}]: ").strip()
-            args.host = entered or args.host
-            args.prompt_host = False
         if args.command in (None, "desktop"):
-            from ogx_desktop_qt import run_gui
-            return run_gui(args.host, rate=getattr(args, "rate", 60))
+            if args.prompt_host:
+                entered = input(f"Adapter IP or local name [{args.host}]: ").strip()
+                args.host = device_url(entered or args.host)
+            try:
+                from ogx_desktop import run_desktop
+            except ImportError as error:
+                raise RemoteError("The desktop needs PySide6. Install tools/pc/requirements.txt: " + str(error)) from error
+            return run_desktop(args.host, port=getattr(args, "port", 8765), rate=getattr(args, "rate", 60))
         asyncio.run(async_main(args))
         return 0
     except KeyboardInterrupt:

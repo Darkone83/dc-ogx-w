@@ -8,7 +8,7 @@ use std::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tungstenite::{connect, stream::MaybeTlsStream, Message, WebSocket};
+use tungstenite::{client::client_with_config, protocol::WebSocketConfig, Message, WebSocket};
 use super::network;
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,7 +23,12 @@ pub struct Pad {
     pub rt: u8,
 }
 impl Pad {
-    fn neutral(self) -> bool { self == Self::default() }
+    // Allow normal stick drift only when arming after a pause. Outgoing stick
+    // values are never filtered here; the adapter's calibration stays authoritative.
+    fn neutral(self) -> bool {
+        self.buttons == 0 && self.dpad == 0 && self.lt <= 8 && self.rt <= 8 &&
+            [self.lx, self.ly, self.rx, self.ry].iter().all(|v| v.unsigned_abs() <= 4096)
+    }
     fn valid(self) -> bool {
         self.buttons <= 0x0fff && self.dpad <= 15 &&
             (self.dpad & 3) != 3 && (self.dpad & 12) != 12
@@ -54,34 +59,53 @@ pub struct ControlStatus {
     pub focused: bool,
     pub error: Option<String>,
     pub last_sent: Pad,
+    pub starting: bool,
+    pub needs_neutral: bool,
+    pub gamepad_connected: Option<bool>,
+}
+
+struct StartingGuard<'a>(&'a AtomicBool);
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
 }
 
 pub struct ControlManager {
     current: Mutex<Option<Arc<Session>>>,
     keyboard: Mutex<Pad>,
-    source: AtomicU8, // 0 = keyboard, 1 = native XInput
+    source: AtomicU8, // 0 = keyboard, 1 = native XInput, 2 = standard browser gamepad
     slot: AtomicU8,
     focused: AtomicBool,
     needs_neutral: AtomicBool,
+    starting: AtomicBool,
+    generation: AtomicU32,
+    browser_updated: Mutex<Option<Instant>>,
+    gamepad_connected: AtomicBool,
 }
 impl ControlManager {
     pub fn new() -> Self {
         Self { current: Mutex::new(None), keyboard: Mutex::new(Pad::default()),
             source: AtomicU8::new(0), slot: AtomicU8::new(0),
-            focused: AtomicBool::new(true), needs_neutral: AtomicBool::new(true) }
+            focused: AtomicBool::new(true), needs_neutral: AtomicBool::new(true),
+            starting: AtomicBool::new(false), generation: AtomicU32::new(0),
+            browser_updated: Mutex::new(None), gamepad_connected: AtomicBool::new(false) }
     }
     pub fn set_keyboard(&self, state: Pad) -> Result<(), String> {
         if !state.valid() { return Err("Invalid controller state".into()); }
         *self.keyboard.lock().map_err(|_| "Input lock failed")? = state;
+        if self.source.load(Ordering::SeqCst) == 2 {
+            *self.browser_updated.lock().map_err(|_| "Input clock unavailable")? = Some(Instant::now());
+        }
         Ok(())
     }
     pub fn set_source(&self, source: &str, slot: u8) -> Result<(), String> {
-        if slot > 3 { return Err("XInput slot must be 0-3".into()); }
-        let value = match source { "keyboard" => 0, "gamepad" => 1, _ => return Err("Unsupported input source".into()) };
+        if slot > 3 { return Err("Controller slot must be 0-3".into()); }
+        let value = match source { "keyboard" => 0, "gamepad" => 1, "browser" => 2, _ => return Err("Unsupported input source".into()) };
         self.source.store(value, Ordering::SeqCst);
         self.slot.store(slot, Ordering::SeqCst);
+        self.gamepad_connected.store(false, Ordering::SeqCst);
         self.needs_neutral.store(true, Ordering::SeqCst);
         *self.keyboard.lock().map_err(|_| "Input lock failed")? = Pad::default();
+        *self.browser_updated.lock().map_err(|_| "Input clock unavailable")? = None;
         Ok(())
     }
     pub fn set_focused(&self, focused: bool) {
@@ -92,6 +116,7 @@ impl ControlManager {
         }
     }
     pub fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if let Ok(guard) = self.current.lock() {
             if let Some(s) = guard.as_ref() { s.wanted.store(false, Ordering::SeqCst); }
         }
@@ -99,20 +124,21 @@ impl ControlManager {
         self.needs_neutral.store(true, Ordering::SeqCst);
     }
     pub fn wait_for_release(&self) -> Result<(), String> {
-        let session = self.current.lock().map_err(|_| "Session lock failed")?.clone();
-        if let Some(session) = session {
-            for _ in 0..100 {
-                if !session.alive.load(Ordering::SeqCst) { return Ok(()); }
-                thread::sleep(Duration::from_millis(30));
-            }
-            return Err("The controller is still releasing. Try again after it finishes.".into());
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let session = self.current.lock().map_err(|_| "Session lock failed")?.clone();
+            if !self.starting.load(Ordering::SeqCst) &&
+                session.as_ref().is_none_or(|s| !s.alive.load(Ordering::SeqCst)) { return Ok(()); }
+            if Instant::now() >= deadline { return Err("The controller is still releasing. Try again after it finishes.".into()); }
+            thread::sleep(Duration::from_millis(20));
         }
-        Ok(())
     }
     pub fn status(&self) -> ControlStatus {
-        let source = if self.source.load(Ordering::SeqCst) == 1 { "gamepad" } else { "keyboard" };
+        let source = match self.source.load(Ordering::SeqCst) { 1 => "gamepad", 2 => "browser", _ => "keyboard" };
         let mut result = ControlStatus { active: false, token_held: false, rate_hz: 60, source,
-            focused: self.focused.load(Ordering::SeqCst), error: None, last_sent: Pad::default() };
+            focused: self.focused.load(Ordering::SeqCst), error: None, last_sent: Pad::default(),
+            starting: self.starting.load(Ordering::SeqCst), needs_neutral: self.needs_neutral.load(Ordering::SeqCst),
+            gamepad_connected: if source == "gamepad" { Some(self.gamepad_connected.load(Ordering::SeqCst)) } else { None } };
         if let Ok(guard) = self.current.lock() {
             if let Some(session) = guard.as_ref() {
                 result.active = session.alive.load(Ordering::SeqCst) && session.wanted.load(Ordering::SeqCst);
@@ -124,9 +150,15 @@ impl ControlManager {
         }
         result
     }
-    pub fn take(self: &Arc<Self>, base: &str) -> Result<(), String> {
-        let mut guard = self.current.lock().map_err(|_| "Session lock failed")?;
-        if guard.as_ref().is_some_and(|s| s.alive.load(Ordering::SeqCst)) {
+    pub fn generation(&self) -> u32 { self.generation.load(Ordering::SeqCst) }
+    pub fn take(self: &Arc<Self>, base: &str, generation: u32) -> Result<(), String> {
+        if self.starting.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return Err("A controller session is already starting.".into());
+        }
+        let _starting = StartingGuard(&self.starting);
+        if self.generation() != generation { return Err("Controller acquisition cancelled.".into()); }
+        let existing = self.current.lock().map_err(|_| "Session lock failed")?.clone();
+        if existing.as_ref().is_some_and(|s| s.alive.load(Ordering::SeqCst)) {
             return Err("A controller session is already active or releasing.".into());
         }
         // Check mode BEFORE taking ownership; switching modes is an explicit user action.
@@ -142,30 +174,23 @@ impl ControlManager {
         }
         let rate = status.pointer("/network/input_hz").and_then(Value::as_u64)
             .unwrap_or(60).clamp(10, 60) as u32;
-        let url = base.replacen("http://", "ws://", 1) + "/ws";
-        let (mut websocket, _) = connect(url.as_str())
-            .map_err(|e| format!("Could not open the controller WebSocket: {e}"))?;
-        if let MaybeTlsStream::Plain(stream) = websocket.get_mut() {
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(2)));
-            let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
-        }
+        let mut websocket = connect_stream(base)?;
+        if self.generation.load(Ordering::SeqCst) != generation { return Err("Controller acquisition cancelled.".into()); }
         // Only a definite 503 service_busy is safe to retry; never repeat a
         // timed-out acquire because a lease could have been granted.
-        let mut granted = None;
-        for attempt in 0..=8 {
-            match network::request(base, "/api/control/acquire", Some(&json!({"client":"windows"}))) {
-                Ok(reply) => { granted = reply.get("token").and_then(Value::as_u64); break; }
-                Err(err) if err.status == 503 && err.code == "service_busy" && attempt < 8 => {
-                    thread::sleep(Duration::from_millis(100 * (attempt + 1).min(4)));
-                }
-                Err(err) => return Err(err.detail),
-            }
-        }
-        let token = granted.ok_or("Adapter did not return an ownership token")?;
+        let reply = network::request(base, "/api/control/acquire", Some(&json!({"client":"windows"})))
+            .map_err(|err| err.detail)?;
+        let token = reply.get("token").and_then(Value::as_u64).ok_or("Adapter did not return an ownership token")?;
         if token == 0 || token > u32::MAX as u64 { return Err("Invalid ownership token".into()); }
         self.needs_neutral.store(true, Ordering::SeqCst);
         *self.keyboard.lock().map_err(|_| "Input lock failed")? = Pad::default();
         let session = Arc::new(Session::new(rate, token as u32));
+        let mut guard = self.current.lock().map_err(|_| "Session lock failed")?;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            drop(guard);
+            let _ = network::request(base, "/api/control/release", Some(&json!({"token":token})));
+            return Err("Controller acquisition cancelled.".into());
+        }
         *guard = Some(Arc::clone(&session));
         let manager = Arc::clone(self);
         let worker_base = base.to_string();
@@ -179,6 +204,7 @@ impl ControlManager {
                 session.alive.store(false, Ordering::SeqCst);
                 session.token.store(0, Ordering::SeqCst);
                 *guard = None;
+                drop(guard);
                 let _ = network::request(base, "/api/control/release", Some(&json!({"token":token})));
                 Err(format!("Cannot start the input worker: {err}"))
             }
@@ -186,11 +212,21 @@ impl ControlManager {
     }
     fn sample(&self) -> Pad {
         if !self.focused.load(Ordering::SeqCst) { return Pad::default(); }
-        let input = if self.source.load(Ordering::SeqCst) == 0 {
+        let source = self.source.load(Ordering::SeqCst);
+        if source == 2 && !self.browser_updated.lock().ok().and_then(|t| *t)
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(200)) {
+            self.needs_neutral.store(true, Ordering::SeqCst);
+            return Pad::default();
+        }
+        let input = if source != 1 {
             self.keyboard.lock().map(|p| *p).unwrap_or_default()
         } else {
-            xinput::read(self.slot.load(Ordering::SeqCst)).unwrap_or_default()
+            match xinput::read(self.slot.load(Ordering::SeqCst)) {
+                Some(pad) => { self.gamepad_connected.store(true, Ordering::SeqCst); pad },
+                None => { self.gamepad_connected.store(false, Ordering::SeqCst); self.needs_neutral.store(true, Ordering::SeqCst); return Pad::default(); }
+            }
         };
+        if !input.valid() { self.needs_neutral.store(true, Ordering::SeqCst); return Pad::default(); }
         if self.needs_neutral.load(Ordering::SeqCst) {
             if input.neutral() { self.needs_neutral.store(false, Ordering::SeqCst); }
             return Pad::default();
@@ -199,16 +235,39 @@ impl ControlManager {
     }
 }
 
+fn connect_stream(base: &str) -> Result<WebSocket<TcpStream>, String> {
+    let url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    let addresses = url.socket_addrs(|| Some(80)).map_err(|e| format!("Cannot resolve adapter: {e}"))?;
+    let mut stream = None;
+    for address in addresses {
+        if let Ok(socket) = TcpStream::connect_timeout(&address, Duration::from_secs(2)) { stream = Some(socket); break; }
+    }
+    let stream = stream.ok_or("Cannot connect to the adapter WebSocket.")?;
+    stream.set_nodelay(true).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;
+    let mut config = WebSocketConfig::default();
+    config.write_buffer_size = 0;
+    config.max_write_buffer_size = 2048;
+    let uri = base.replacen("http://", "ws://", 1) + "/ws";
+    let (mut ws, _) = client_with_config(uri.as_str(), stream, Some(config))
+        .map_err(|e| format!("Could not open the controller WebSocket: {e}"))?;
+    ws.get_mut().set_read_timeout(Some(Duration::from_millis(2))).map_err(|e| e.to_string())?;
+    ws.get_mut().set_write_timeout(Some(Duration::from_millis(100))).map_err(|e| e.to_string())?;
+    Ok(ws)
+}
+
 fn run_session(manager: &ControlManager, session: &Session, base: &str,
-               ws: &mut WebSocket<MaybeTlsStream<TcpStream>>) {
+               ws: &mut WebSocket<TcpStream>) {
     let token = session.token.load(Ordering::SeqCst);
     let interval = Duration::from_micros(1_000_000u64 / u64::from(session.rate_hz));
     let mut seq = 0u32;
     let mut next_frame = Instant::now();
-    let mut last_ok = Instant::now();
-    let mut last_heartbeat = Instant::now();
+    let mut last_frame = Instant::now();
     let mut error: Option<String> = None;
     while session.wanted.load(Ordering::SeqCst) {
+        if last_frame.elapsed() >= Duration::from_millis(250) { manager.needs_neutral.store(true, Ordering::SeqCst); }
+        last_frame = Instant::now();
         let pad = manager.sample();
         let msg = json!({"type":"input", "token":token, "seq":seq,
             "buttons":pad.buttons, "dpad":pad.dpad,
@@ -225,12 +284,6 @@ fn run_session(manager: &ControlManager, session: &Session, base: &str,
         }
         if let Ok(mut last) = session.last_sent.lock() { *last = pad; }
         seq = seq.wrapping_add(1);
-        last_ok = Instant::now();
-        if last_heartbeat.elapsed() >= Duration::from_secs(1) {
-            // Input messages maintain the owner lease. A separate heartbeat is
-            // intentionally unnecessary while fresh samples are flowing.
-            last_heartbeat = Instant::now();
-        }
         match ws.read() {
             Ok(Message::Close(_)) => { error = Some("Adapter closed the control stream.".into()); break; }
             Ok(Message::Text(text)) => {
@@ -252,10 +305,9 @@ fn run_session(manager: &ControlManager, session: &Session, base: &str,
         let now = Instant::now();
         if next_frame > now { thread::sleep(next_frame - now); }
         else { next_frame = now; }
-        // A very long system suspension must never replay old input.
-        if last_ok.elapsed() > Duration::from_secs(2) { manager.needs_neutral.store(true, Ordering::SeqCst); }
     }
     // Send a neutral final state when possible; then relinquish only this token.
+    session.wanted.store(false, Ordering::SeqCst);
     let neutral = json!({"type":"input","token":token,"seq":seq,
         "buttons":0,"dpad":0,"lx":0,"ly":0,"rx":0,"ry":0,"lt":0,"rt":0});
     let _ = ws.send(Message::Text(neutral.to_string().into()));
@@ -271,6 +323,19 @@ fn run_session(manager: &ControlManager, session: &Session, base: &str,
 
 mod xinput {
     use super::Pad;
+    #[cfg(any(windows, test))]
+    pub(super) fn translate(raw: u16, lx: i16, ly: i16, rx: i16, ry: i16, lt: u8, rt: u8) -> Pad {
+        let mut buttons = 0u16;
+        for (xinput, ogx) in [
+            (0x1000, 1), (0x2000, 2), (0x4000, 4), (0x8000, 8),
+            (0x0040, 16), (0x0080, 32), (0x0020, 64), (0x0010, 128),
+            (0x0100, 256), (0x0200, 512),
+        ] { if raw & xinput != 0 { buttons |= ogx; } }
+        let mut dpad = (raw & 15) as u8;
+        if dpad & 3 == 3 { dpad &= !3; }
+        if dpad & 12 == 12 { dpad &= !12; }
+        Pad { buttons, dpad, lx, ly, rx, ry, lt, rt }
+    }
     #[cfg(windows)]
     #[repr(C)]
     #[allow(non_snake_case)]
@@ -299,18 +364,8 @@ mod xinput {
             let mut state = XInputState::default();
             if unsafe { XInputGetState(u32::from(slot), &mut state) } != 0 { return None; }
             let g = state.Gamepad;
-            let mut buttons = 0u16;
-            for (xinput, ogx) in [
-                (0x1000, 1), (0x2000, 2), (0x4000, 4), (0x8000, 8),
-                (0x0040, 16), (0x0080, 32), (0x0020, 64), (0x0010, 128),
-                (0x0100, 256), (0x0200, 512),
-            ] { if g.wButtons & xinput != 0 { buttons |= ogx; } }
-            let mut dpad = 0;
-            for (xinput, ogx) in [(0x0001,1),(0x0002,2),(0x0004,4),(0x0008,8)] {
-                if g.wButtons & xinput != 0 { dpad |= ogx; }
-            }
-            Some(Pad { buttons, dpad, lx:g.sThumbLX, ly:g.sThumbLY, rx:g.sThumbRX,
-                ry:g.sThumbRY, lt:g.bLeftTrigger, rt:g.bRightTrigger })
+            Some(translate(g.wButtons, g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY,
+                g.bLeftTrigger, g.bRightTrigger))
         }
         #[cfg(not(windows))]
         { let _ = slot; None }
@@ -325,5 +380,34 @@ mod tests {
         assert!(Pad::default().valid());
         assert!(!Pad{dpad:3,..Pad::default()}.valid());
         assert!(!Pad{dpad:12,..Pad::default()}.valid());
+    }
+    #[test]
+    fn xinput_preserves_buttons_axes_and_white_black() {
+        let p = xinput::translate(0x1301, i16::MIN, i16::MAX, 123, -456, 17, 255);
+        assert_eq!(p.buttons, 1 | 256 | 512);
+        assert_eq!(p.dpad, 1);
+        assert_eq!((p.lx, p.ly, p.rx, p.ry, p.lt, p.rt), (i16::MIN, i16::MAX, 123, -456, 17, 255));
+        assert_eq!(xinput::translate(15, 0, 0, 0, 0, 0, 0).dpad, 0);
+    }
+    #[test]
+    fn focus_and_browser_freshness_require_neutral_before_resume() {
+        let manager = ControlManager::new();
+        manager.set_source("browser", 0).unwrap();
+        let held = Pad { buttons: 256, ..Pad::default() };
+        manager.set_keyboard(held).unwrap();
+        assert_eq!(manager.sample(), Pad::default());
+        // Stick drift is accepted for arming, but its raw values remain intact.
+        let centre = Pad { lx: 512, ..Pad::default() };
+        manager.set_keyboard(centre).unwrap();manager.sample();
+        assert_eq!(manager.sample(), centre);
+        manager.set_keyboard(held).unwrap();assert_eq!(manager.sample(), held);
+        *manager.browser_updated.lock().unwrap() = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(manager.sample(), Pad::default());
+        manager.set_keyboard(held).unwrap();assert_eq!(manager.sample(), Pad::default());
+        manager.set_keyboard(Pad::default()).unwrap();manager.sample();
+        manager.set_keyboard(held).unwrap();assert_eq!(manager.sample(), held);
+        manager.set_focused(false);assert_eq!(manager.sample(), Pad::default());
+        manager.set_keyboard(held).unwrap();manager.set_focused(true);
+        assert_eq!(manager.sample(), Pad::default());
     }
 }

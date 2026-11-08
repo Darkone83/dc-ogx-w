@@ -3,7 +3,7 @@
 mod control;
 mod network;
 
-use std::{fs, path::PathBuf, sync::{Arc, Mutex}};
+use std::{fs, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 use serde_json::Value;
 use tauri::{Manager, State, WindowEvent};
 
@@ -11,6 +11,7 @@ struct AppState {
     device: Mutex<Option<String>>,
     control: Arc<control::ControlManager>,
     http_gate: Arc<Mutex<()>>,
+    closing: AtomicBool,
 }
 
 fn current_device(state: &AppState) -> Result<String, String> {
@@ -46,10 +47,12 @@ async fn connect_device(address: String, state: State<'_, AppState>) -> Result<V
 }
 
 #[tauri::command]
-fn disconnect_device(state: State<'_, AppState>) -> Result<(), String> {
+async fn disconnect_device(state: State<'_, AppState>) -> Result<(), String> {
     state.control.stop();
     *state.device.lock().map_err(|_| "Device lock failed".to_string())? = None;
-    Ok(())
+    let manager = Arc::clone(&state.control);
+    tauri::async_runtime::spawn_blocking(move || manager.wait_for_release())
+        .await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -70,10 +73,11 @@ async fn device_api(path: String, body: Option<Value>, state: State<'_, AppState
 async fn take_control(state: State<'_, AppState>) -> Result<(), String> {
     let base = current_device(&state)?;
     let manager = Arc::clone(&state.control);
+    let generation = manager.generation();
     let gate = Arc::clone(&state.http_gate);
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = gate.lock().map_err(|_| "HTTP queue unavailable".to_string())?;
-        manager.take(&base)
+        manager.take(&base, generation)
     })
         .await.map_err(|e| e.to_string())?
 }
@@ -138,7 +142,7 @@ fn save_preferences(preferences: Value) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .manage(AppState { device: Mutex::new(None), control: Arc::new(control::ControlManager::new()),
-            http_gate: Arc::new(Mutex::new(())) })
+            http_gate: Arc::new(Mutex::new(())), closing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
             discover_devices, connect_device, disconnect_device, device_api,
             take_control, release_control, set_keyboard_input, set_input_source,
@@ -148,8 +152,17 @@ fn main() {
             if let WindowEvent::Focused(focused) = event {
                 window.state::<AppState>().control.set_focused(*focused);
             }
-            if let WindowEvent::CloseRequested { .. } = event {
-                window.state::<AppState>().control.stop();
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let state = window.state::<AppState>();
+                if state.closing.swap(true, Ordering::SeqCst) { return; }
+                state.control.stop();
+                let manager = Arc::clone(&state.control);
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || manager.wait_for_release()).await;
+                    let _ = window.destroy();
+                });
             }
         })
         .run(tauri::generate_context!())

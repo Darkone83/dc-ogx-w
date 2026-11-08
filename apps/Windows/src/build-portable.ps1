@@ -20,8 +20,8 @@ rustc --version
 cargo --version
 
 Write-Host 'Installing Tauri CLI development dependency...' -ForegroundColor Cyan
-npm.cmd install --no-audit --no-fund
-if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
+npm.cmd ci --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
 
 Write-Host 'Building optimized portable EXE...' -ForegroundColor Cyan
 npm.cmd run build
