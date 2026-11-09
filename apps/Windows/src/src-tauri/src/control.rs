@@ -40,13 +40,15 @@ struct Session {
     alive: AtomicBool,
     token: AtomicU32,
     rate_hz: u32,
+    return_physical: bool,
+    release_error: Mutex<Option<String>>,
     error: Mutex<Option<String>>,
     last_sent: Mutex<Pad>,
 }
 impl Session {
-    fn new(rate_hz: u32, token: u32) -> Self {
+    fn new(rate_hz: u32, token: u32, return_physical: bool) -> Self {
         Self { wanted: AtomicBool::new(true), alive: AtomicBool::new(true), token: AtomicU32::new(token),
-            rate_hz, error: Mutex::new(None), last_sent: Mutex::new(Pad::default()) }
+            rate_hz, return_physical, release_error: Mutex::new(None), error: Mutex::new(None), last_sent: Mutex::new(Pad::default()) }
     }
 }
 
@@ -124,11 +126,14 @@ impl ControlManager {
         self.needs_neutral.store(true, Ordering::SeqCst);
     }
     pub fn wait_for_release(&self) -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let session = self.current.lock().map_err(|_| "Session lock failed")?.clone();
             if !self.starting.load(Ordering::SeqCst) &&
-                session.as_ref().is_none_or(|s| !s.alive.load(Ordering::SeqCst)) { return Ok(()); }
+                session.as_ref().is_none_or(|s| !s.alive.load(Ordering::SeqCst)) {
+                return session.as_ref().and_then(|s| s.release_error.lock().ok().and_then(|mut e| e.take()))
+                    .map_or(Ok(()), Err);
+            }
             if Instant::now() >= deadline { return Err("The controller is still releasing. Try again after it finishes.".into()); }
             thread::sleep(Duration::from_millis(20));
         }
@@ -161,54 +166,72 @@ impl ControlManager {
         if existing.as_ref().is_some_and(|s| s.alive.load(Ordering::SeqCst)) {
             return Err("A controller session is already active or releasing.".into());
         }
-        // Check mode BEFORE taking ownership; switching modes is an explicit user action.
         let status = network::request(base, "/api/status", None).map_err(|e| e.detail)?;
-        if status.pointer("/control/maintenance").and_then(Value::as_bool) == Some(true) {
+        self.check_generation(generation)?;
+        let control = status.get("control").cloned().unwrap_or(Value::Null);
+        if control.get("maintenance").and_then(Value::as_bool) == Some(true) {
             return Err("Firmware maintenance is active; input is unavailable.".into());
         }
-        if status.pointer("/control/mode_pending").and_then(Value::as_bool) == Some(true) {
-            return Err("The controller mode transition has not finished.".into());
+        if control.get("active").and_then(Value::as_bool) == Some(true) {
+            return Err("Another client has control. Release it before taking control.".into());
         }
-        if status.pointer("/control/mode").and_then(Value::as_str) != Some("wifi") {
-            return Err("Select Wi-Fi remote control mode before taking ownership.".into());
-        }
+        let physical_supported = control.get("physical_supported").and_then(Value::as_bool) == Some(true) ||
+            control.get("bluetooth_supported").and_then(Value::as_bool) == Some(true);
         let rate = status.pointer("/network/input_hz").and_then(Value::as_u64)
             .unwrap_or(60).clamp(10, 60) as u32;
-        let mut websocket = connect_stream(base)?;
-        if self.generation.load(Ordering::SeqCst) != generation { return Err("Controller acquisition cancelled.".into()); }
-        // Only a definite 503 service_busy is safe to retry; never repeat a
-        // timed-out acquire because a lease could have been granted.
-        let reply = network::request(base, "/api/control/acquire", Some(&json!({"client":"windows"})))
-            .map_err(|err| err.detail)?;
-        let token = reply.get("token").and_then(Value::as_u64).ok_or("Adapter did not return an ownership token")?;
-        if token == 0 || token > u32::MAX as u64 { return Err("Invalid ownership token".into()); }
-        self.needs_neutral.store(true, Ordering::SeqCst);
-        *self.keyboard.lock().map_err(|_| "Input lock failed")? = Pad::default();
-        let session = Arc::new(Session::new(rate, token as u32));
-        let mut guard = self.current.lock().map_err(|_| "Session lock failed")?;
-        if self.generation.load(Ordering::SeqCst) != generation {
-            drop(guard);
-            let _ = network::request(base, "/api/control/release", Some(&json!({"token":token})));
-            return Err("Controller acquisition cancelled.".into());
-        }
-        *guard = Some(Arc::clone(&session));
-        let manager = Arc::clone(self);
-        let worker_base = base.to_string();
-        let worker_session = Arc::clone(&session);
-        match thread::Builder::new().name("ogx-w-input".into()).spawn(move || {
-            run_session(&manager, &worker_session, &worker_base, &mut websocket);
-        }) {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                session.wanted.store(false, Ordering::SeqCst);
-                session.alive.store(false, Ordering::SeqCst);
-                session.token.store(0, Ordering::SeqCst);
-                *guard = None;
-                drop(guard);
-                let _ = network::request(base, "/api/control/release", Some(&json!({"token":token})));
-                Err(format!("Cannot start the input worker: {err}"))
+        let mut return_physical = false;
+        let mut granted_token = None;
+        let mut websocket = None;
+        let result = (|| -> Result<(), String> {
+            // Follow the WebUI: mutate once, then poll only the small mode reply.
+            if control.get("mode").and_then(Value::as_str) != Some("wifi") ||
+                control.get("mode_pending").and_then(Value::as_bool) == Some(true) {
+                let state = request_mode(base, "wifi")?;
+                return_physical = physical_supported;
+                wait_for_mode(base, "wifi", state, || self.check_generation(generation))?;
             }
+            self.check_generation(generation)?;
+            websocket = Some(connect_stream(base)?);
+            self.check_generation(generation)?;
+            let reply = network::request(base, "/api/control/acquire", Some(&json!({"client":"windows"})))
+                .map_err(|err| err.detail)?;
+            let token = reply.get("token").and_then(Value::as_u64).ok_or("Adapter did not return an ownership token")?;
+            if token == 0 || token > u32::MAX as u64 { return Err("Invalid ownership token".into()); }
+            granted_token = Some(token as u32);
+            return_physical = physical_supported;
+            self.check_generation(generation)?;
+            self.needs_neutral.store(true, Ordering::SeqCst);
+            *self.keyboard.lock().map_err(|_| "Input lock failed")? = Pad::default();
+            let session = Arc::new(Session::new(rate, token as u32, return_physical));
+            let mut guard = self.current.lock().map_err(|_| "Session lock failed")?;
+            self.check_generation(generation)?;
+            *guard = Some(Arc::clone(&session));
+            let manager = Arc::clone(self);
+            let worker_base = base.to_string();
+            let worker_session = Arc::clone(&session);
+            let mut ws = websocket.take().unwrap();
+            match thread::Builder::new().name("ogx-w-input".into()).spawn(move || {
+                run_session(&manager, &worker_session, &worker_base, &mut ws);
+            }) {
+                Ok(_) => { granted_token = None; return_physical = false; Ok(()) },
+                Err(err) => { *guard = None; Err(format!("Cannot start the input worker: {err}")) }
+            }
+        })();
+        if let Err(mut error) = result {
+            let released = granted_token.is_some_and(|token|
+                network::request(base, "/api/control/release", Some(&json!({"token":token}))).is_ok());
+            if let Some(mut ws) = websocket { close_stream(&mut ws); }
+            if return_physical {
+                if let Err(cleanup) = restore_physical(base, released) {
+                    error.push_str(&format!(" Physical-mode handback failed: {cleanup}"));
+                }
+            }
+            return Err(error);
         }
+        Ok(())
+    }
+    fn check_generation(&self, generation: u32) -> Result<(), String> {
+        if self.generation() != generation { Err("Controller acquisition cancelled.".into()) } else { Ok(()) }
     }
     fn sample(&self) -> Pad {
         if !self.focused.load(Ordering::SeqCst) { return Pad::default(); }
@@ -233,6 +256,56 @@ impl ControlManager {
         }
         input
     }
+}
+
+// A mode POST with a lost reply is reconciled by GET, never replayed blindly.
+fn request_mode(base: &str, mode: &str) -> Result<Value, String> {
+    match network::request(base, "/api/control/mode", Some(&json!({"mode":mode}))) {
+        Ok(state) => Ok(state),
+        Err(error) if error.status == 0 => {
+            let state = network::request(base, "/api/control/mode", None).map_err(|e| e.detail)?;
+            if state.get("mode").and_then(Value::as_str) == Some(mode) ||
+                state.get("requested_mode").and_then(Value::as_str) == Some(mode) { Ok(state) }
+            else { Err(error.detail) }
+        },
+        Err(error) => Err(error.detail),
+    }
+}
+
+fn wait_for_mode(base: &str, mode: &str, mut state: Value,
+                 check: impl Fn() -> Result<(), String>) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        check()?;
+        if state.get("mode").and_then(Value::as_str) == Some(mode) &&
+            state.get("mode_pending").and_then(Value::as_bool) != Some(true) { return Ok(()); }
+        if Instant::now() >= deadline { return Err(format!("The adapter did not finish switching to {mode} input.")); }
+        thread::sleep(Duration::from_millis(150));
+        check()?;
+        state = network::request(base, "/api/control/mode", None).map_err(|e| e.detail)?;
+    }
+}
+
+fn restore_physical(base: &str, released: bool) -> Result<(), String> {
+    if !released {
+        // The firmware also releases on socket close. Check for a new owner
+        // before changing modes, which would otherwise clear that lease.
+        let status = network::request(base, "/api/status", None).map_err(|e| e.detail)?;
+        let control = status.get("control").cloned().unwrap_or(Value::Null);
+        if control.get("active").and_then(Value::as_bool) == Some(true) {
+            return Err("Another client owns control; Physical mode was not selected.".into());
+        }
+        if control.get("mode").and_then(Value::as_str) != Some("wifi") &&
+            control.get("requested_mode").and_then(Value::as_str) != Some("wifi") { return Ok(()); }
+    }
+    let state = request_mode(base, "physical")?;
+    wait_for_mode(base, "physical", state, || Ok(()))
+}
+
+fn close_stream(ws: &mut WebSocket<TcpStream>) {
+    let _ = ws.close(None);
+    // Free the stream before the mode handback opens its HTTP connection.
+    let _ = ws.get_mut().shutdown(std::net::Shutdown::Both);
 }
 
 fn connect_stream(base: &str) -> Result<WebSocket<TcpStream>, String> {
@@ -285,7 +358,13 @@ fn run_session(manager: &ControlManager, session: &Session, base: &str,
         if let Ok(mut last) = session.last_sent.lock() { *last = pad; }
         seq = seq.wrapping_add(1);
         match ws.read() {
-            Ok(Message::Close(_)) => { error = Some("Adapter closed the control stream.".into()); break; }
+            Ok(Message::Close(frame)) => {
+                error = Some(match frame {
+                    Some(frame) => format!("Adapter closed the control stream ({}): {}", frame.code, frame.reason),
+                    None => "Adapter closed the control stream without a close reason.".into(),
+                });
+                break;
+            }
             Ok(Message::Text(text)) => {
                 if let Ok(reply) = serde_json::from_str::<Value>(&text) {
                     if reply.get("ok").and_then(Value::as_bool) == Some(false) &&
@@ -312,8 +391,15 @@ fn run_session(manager: &ControlManager, session: &Session, base: &str,
         "buttons":0,"dpad":0,"lx":0,"ly":0,"rx":0,"ry":0,"lt":0,"rt":0});
     let _ = ws.send(Message::Text(neutral.to_string().into()));
     let _ = ws.flush();
-    let _ = ws.close(None);
-    let _ = network::request(base, "/api/control/release", Some(&json!({"token":token})));
+    let release = network::request(base, "/api/control/release", Some(&json!({"token":token})));
+    close_stream(ws);
+    let cleanup = if session.return_physical { restore_physical(base, release.is_ok()) }
+                  else { release.map(|_| ()).map_err(|e| e.detail) };
+    if let Err(detail) = cleanup {
+        let detail = format!("Controller stopped, but release/Physical-mode handback was not confirmed: {detail}");
+        if let Ok(mut slot) = session.release_error.lock() { *slot = Some(detail.clone()); }
+        error = Some(error.map_or(detail.clone(), |prior| format!("{prior} {detail}")));
+    }
     if let Ok(mut last) = session.last_sent.lock() { *last = Pad::default(); }
     if let Ok(mut slot) = session.error.lock() { *slot = error; }
     session.token.store(0, Ordering::SeqCst);

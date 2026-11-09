@@ -488,13 +488,14 @@ bool start(const Config &config, const Callbacks &sink) {
     cyw43_arch_enable_ap_mode(config.ssid, config.password, CYW43_AUTH_WPA2_AES_PSK);
     ap_active = true;
     ap_cutover_due = ap_restore_due = 0;
-    // On the official Pico W, Wi-Fi and BT share one CYW43439 radio.
-    // PM2 is the SDK's preferred high-throughput policy. Unlike NO_PM, it
-    // permits Wi-Fi idle periods that may help BLE HID coexistence. This is a
-    // deliberate A/B change, not a guarantee of Bluetooth reliability.
-    const int wifi_pm_result = cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+    // Keep this USB-powered adapter reachable while the UI/controllers are
+    // idle. PERFORMANCE_PM still enables PM2 power saving; NONE_PM disables
+    // Wi-Fi power saving without changing Bluetooth or the shared run loop.
+    // STA remains enabled across AP cutover and station reconnects, so the
+    // policy stays in effect for both Pico W and Pico 2 W.
+    const int wifi_pm_result = cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
     if (wifi_pm_result != 0) {
-        printf("[CYW43] Wi-Fi performance PM configuration failed: %d\n", wifi_pm_result);
+        printf("[CYW43] Disabling Wi-Fi power saving failed: %d\n", wifi_pm_result);
     }
 
     ip4_addr_t address, mask, gateway;

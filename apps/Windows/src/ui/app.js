@@ -160,7 +160,7 @@ async function showPage(page) {
   await loadPage(page);
 }
 async function refreshStatus() {
-  if(!online||pollBusy)return;
+  if(!online||pollBusy||sessionBusy||currentControl.active||currentControl.starting||currentControl.token_held)return;
   pollBusy=true;const epoch=connectionEpoch;
   try {const status=await invoke("device_api",{path:"/api/status",body:null});
     if(!online||epoch!==connectionEpoch)return;
@@ -293,9 +293,13 @@ async function takeControl() {
 }
 async function releaseControl(show=true) {
   resetKeyboard();
-  try {await invoke("release_control");if(show)notify("Controller released; output neutralized.");}
+  try {
+    await invoke("release_control");
+    if(show)notify("Controller session stopped.");
+  }
   catch(e){if(show)inform(e);}
   await refreshControl();
+  if(show&&online)void refreshStatus();
 }
 async function refreshControl() {
   if(controlPollBusy)return;
@@ -316,8 +320,8 @@ async function refreshControl() {
         : data.source==="browser"&&browserMessage?browserMessage
         : data.needs_neutral?"Centre sticks and release all controls to begin."
         : `Controller active · ${sourceName}. F8 or Esc releases.`
-      : data.starting?"Starting a controller session…":data.token_held?"Sending neutral and releasing ownership…"
-      : online?"Connected. Take control to use keyboard or a PC controller.":"Connect to an adapter to take control.";
+      : data.starting?"Selecting Wi-Fi input and starting a controller session…":data.token_held?"Sending neutral and releasing ownership…"
+      : online?"Connected. Take control automatically selects Wi-Fi input for your keyboard or PC controller.":"Connect to an adapter to take control.";
     if(data.error&&!active&&data.error!==refreshControl.previousError) notify(data.error,true);
     refreshControl.previousError=data.error;
   } catch(e){ /* App may be closing. */ } finally{controlPollBusy=false;}
@@ -411,9 +415,9 @@ function keyDown(ev) {
     if(existing)keyBindings[existing]=keyBindings[action];
     keyBindings[action]=ev.code;prefs.keyBindings={...keyBindings};renderKeymap();void savePrefs();return;
   }
-  if(ev.code==="Escape"&&currentControl.active){ev.preventDefault();void releaseControl();return;}
+  if(ev.code==="Escape"&&(currentControl.active||currentControl.starting)){ev.preventDefault();void releaseControl();return;}
   if(ev.code==="F8"&&!ev.repeat&&currentPage==="control"){
-    ev.preventDefault();if(currentControl.active)void releaseControl();else void takeControl();return;
+    ev.preventDefault();if(currentControl.active||currentControl.starting)void releaseControl();else void takeControl();return;
   }
   if(currentPage!=="control"||$("control-source").value!=="keyboard"||!currentControl.active)return;
   if(ev.target?.closest?.("input,select,textarea,button"))return;

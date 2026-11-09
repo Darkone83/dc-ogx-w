@@ -124,7 +124,8 @@ class RemoteClient:
     broken connection gets up to eight neutral reconnect attempts. ``send``
     drops snapshots while reconnecting and requires a fresh resting state
     before enabling input again. Scripts/sequences keep this option off by
-    default. Release always cancels recovery.
+    default. Take selects Wi-Fi input automatically. Release always cancels
+    recovery and returns to Physical (USB / Bluetooth) input when supported.
     """
 
     def __init__(self, host: str = DEFAULT_HOST, *, timeout: float = 4.0, reconnect: bool = False):
@@ -151,6 +152,10 @@ class RemoteClient:
         self._control_requested = False
         self._intent_generation = 0
         self._acquiring = False
+        self._acquire_finished = asyncio.Event()
+        self._acquire_finished.set()
+        self._release_lock = asyncio.Lock()
+        self._return_physical = False
         self._reconnect_task: asyncio.Task | None = None
         self._wifi_only = False
         self._input_mode = "wifi"
@@ -250,11 +255,12 @@ class RemoteClient:
         return await self.request("/api/profile/save", {"revision": revision})
 
     async def acquire(self, name: str = "python", *, _resume: bool = False) -> dict:
-        if self.token is not None or self._acquiring:
-            raise RemoteError("This client already has control or an acquisition pending")
+        if self.token is not None or self._acquiring or self._release_lock.locked():
+            raise RemoteError("Control is already active, starting or releasing")
         if self.reconnecting and not _resume:
             raise RemoteError("A reconnect is already pending; release it before acquiring again")
         self._acquiring = True
+        self._acquire_finished.clear()
         if not _resume:
             self._intent_generation += 1
             self._control_requested = True
@@ -277,10 +283,18 @@ class RemoteClient:
             # open or retain a late stream/lease after that user intent changed.
             status = await self.status()
             check_intent()
+            control = status.get("control", {})
+            physical_supported = (control.get("physical_supported") is True or
+                                  control.get("bluetooth_supported") is True)
             if _resume and (not self._wifi_only or self._input_mode != "wifi"
                             or status.get("control", {}).get("mode_pending")
                             or status.get("control", {}).get("active")):
                 raise RemoteError("Automatic reconnect stopped: input mode or owner changed", code="reconnect_stopped")
+            if not _resume:
+                if control.get("active"):
+                    raise RemoteError("Another client has control. Release it before taking control.", code="control_owned")
+                await self._ensure_wifi_mode(status, check_intent, physical_supported)
+                check_intent()
             self.socket = await self._session().ws_connect(
                 self.url + "/ws", max_msg_size=8192, compress=0,
                 autoping=True, heartbeat=None,
@@ -296,6 +310,7 @@ class RemoteClient:
             # cleanup can release exactly this token, even if Release just ran.
             granted_token = token
             self.token = token
+            self._return_physical = physical_supported
             check_intent()
             self.timeout_ms = int(result.get("timeout_ms", 250))
             advertised_owner = result.get("owner_timeout_ms")
@@ -325,14 +340,72 @@ class RemoteClient:
             if generation == self._intent_generation and (
                     not _resume or (acquire_sent and not known_neutral_failure and not explicit_setup_rejection)):
                 self._control_requested = False
+            released = False
             if granted_token is not None:
                 with contextlib.suppress(Exception):
                     await self.request("/api/control/release", {"token": granted_token})
+                    released = True
             self.token = None
             await self._close_socket()
+            if not _resume:
+                with contextlib.suppress(RemoteError, OSError):
+                    await self._restore_physical(released)
             raise
         finally:
             self._acquiring = False
+            self._acquire_finished.set()
+
+    async def _ensure_wifi_mode(self, status: dict, check_intent, physical_supported: bool) -> None:
+        """Use the WebUI's lightweight handoff before opening a control stream."""
+        check_intent()
+        state = status.get("control", {})
+        if state.get("maintenance"):
+            raise RemoteError("Firmware maintenance is active; input is unavailable.", code="maintenance_active")
+        if state.get("mode") == "wifi" and not state.get("mode_pending"):
+            return
+        await self._change_mode("wifi", check_intent, physical_supported)
+
+    async def _change_mode(self, mode: str, check_intent=lambda: None, restore=False) -> None:
+        try:
+            state = await self.request("/api/control/mode", {"mode": mode})
+        except RemoteError as error:
+            if error.status is not None:
+                raise
+            # A lost mode response is resolved by reading state. Never repeat
+            # the mutation blindly, and never replay an ambiguous lease acquire.
+            state = await self.request("/api/control/mode")
+            if state.get("mode") != mode and state.get("requested_mode") != mode:
+                raise error
+        if mode == "wifi":
+            self._return_physical = restore
+        check_intent()
+        deadline = time.monotonic() + 8
+        while state.get("mode") != mode or state.get("mode_pending"):
+            if time.monotonic() >= deadline:
+                raise RemoteError(f"The adapter did not finish switching to {mode} input.", code="control_mode_pending")
+            await asyncio.sleep(.15)
+            check_intent()
+            state = await self.request("/api/control/mode")
+            check_intent()
+            if state.get("maintenance"):
+                raise RemoteError("Firmware maintenance is active; input is unavailable.", code="maintenance_active")
+        self._input_mode = mode
+
+    async def _restore_physical(self, released=False) -> None:
+        if not self._return_physical:
+            return
+        if not released:
+            # A closed stream may already have released our lease. Do not use
+            # a mode change to evict a different client that now owns control.
+            control = (await self.status()).get("control", {})
+            if control.get("active"):
+                self._return_physical = False
+                raise RemoteError("Another client owns control; Physical mode was not selected.")
+            if control.get("mode") != "wifi" and control.get("requested_mode") != "wifi":
+                self._return_physical = False
+                return
+        await self._change_mode("physical")
+        self._return_physical = False
 
     def _lost_connection(self, message: str, *, recoverable: bool = True) -> None:
         self._connection_error = message
@@ -510,14 +583,26 @@ class RemoteClient:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reconnect_task
         self._reconnect_task = None
-        token = self.token
-        if token is not None:
-            with contextlib.suppress(RemoteError, OSError):
-                await self.send(PadState())
-            self.token = None
-            with contextlib.suppress(RemoteError, OSError):
-                await self.request("/api/control/release", {"token": token})
-        await self._close_socket()
+        async with self._release_lock:
+            # Let a cancelled setup release any confirmed late token before
+            # returning the radio to Physical mode.
+            await self._acquire_finished.wait()
+            token = self.token
+            released = False
+            release_error = None
+            if token is not None:
+                with contextlib.suppress(RemoteError, OSError):
+                    await self.send(PadState())
+                self.token = None
+                try:
+                    await self.request("/api/control/release", {"token": token})
+                    released = True
+                except (RemoteError, OSError) as error:
+                    release_error = error
+            await self._close_socket()
+            await self._restore_physical(released)
+            if release_error and not released and self._input_mode != "physical":
+                raise release_error
 
     async def _close_socket(self) -> None:
         self._closing = True
@@ -537,10 +622,12 @@ class RemoteClient:
             self.socket = None
 
     async def close(self) -> None:
-        await self.release()
-        if self.session is not None:
-            await self.session.close()
-            self.session = None
+        try:
+            await self.release()
+        finally:
+            if self.session is not None:
+                await self.session.close()
+                self.session = None
 
 
 def parse_sequence(steps: list[dict]) -> list[tuple[PadState, float]]:

@@ -160,14 +160,6 @@ class NetworkWorker(QThread):
             intent = self._intent
             self._acquire_task = asyncio.current_task()
             try:
-                status = await self.client.status()
-                if intent != self._intent:
-                    raise RemoteError('Controller acquisition cancelled.')
-                control = status.get('control',{})
-                if control.get('mode') != 'wifi':
-                    raise RemoteError('Select Wi-Fi remote in Profiles before taking control.')
-                if control.get('maintenance') or control.get('mode_pending'):
-                    raise RemoteError('Wait for the adapter to finish its mode change or maintenance.')
                 await self.client.acquire('python-qt')
                 if intent != self._intent:
                     raise RemoteError('Controller acquisition cancelled.')
@@ -232,7 +224,10 @@ class NetworkWorker(QThread):
                     self._running = False
                     self._gate = True
                     self._emit_control(PadState(),str(error))
-                    await self._stop_control()
+                    try:
+                        await self._stop_control()
+                    except (RemoteError, OSError) as cleanup:
+                        self._emit_control(PadState(),str(cleanup))
             if began-last_emit >= 1/min(60,self.rate):
                 self._emit_control(pad if self._running else PadState())
                 last_emit = began
@@ -654,7 +649,7 @@ class CompanionWindow(QMainWindow):
         actions=QHBoxLayout();self.take_button=button('Take control · F8',self.take_control,'primary');self.release_button=button('Release',self.release_control)
         self.control_chip=label('Released');self.control_chip.setObjectName('chip')
         actions.addWidget(self.take_button);actions.addWidget(self.release_button);actions.addStretch();actions.addWidget(self.control_chip);box.addLayout(actions)
-        self.control_message=label('Connect to the adapter and select Wi-Fi remote to take control.');self.control_message.setObjectName('controlMessage');box.addWidget(self.control_message)
+        self.control_message=label('Connect, then Take control. Wi-Fi input is selected automatically.');self.control_message.setObjectName('controlMessage');box.addWidget(self.control_message)
         shoulders=QHBoxLayout()
         self.trigger_sliders={}
         self.trigger_values={}
@@ -858,7 +853,7 @@ class CompanionWindow(QMainWindow):
         def connected(status):
             self.data.clear();self.dirty.clear();self.status_failures=0
             self.set_online(True);self.update_status(status);self.save_preferences()
-            self.notify('Connected to '+str(status.get('board','DC-OGX-W'))+'. Select Wi-Fi remote to use PC input.')
+            self.notify('Connected to '+str(status.get('board','DC-OGX-W'))+'. Take control automatically selects Wi-Fi input.')
             self.load_page(self.current_page)
         self.submit('connect',{'host':host},connected,busy=True,scoped=False)
         self.notify('Connecting to the adapter…')
@@ -1057,7 +1052,8 @@ class CompanionWindow(QMainWindow):
         self.reset_input()
         def released(_):
             self.active=False;self.starting=False
-            if show:self.notify('Local controller session stopped.')
+            self.refresh_status()
+            if show:self.notify('Controller session stopped.')
         self.submit('release',callback=released,scoped=False)
 
     def source_changed(self):
@@ -1135,8 +1131,8 @@ class CompanionWindow(QMainWindow):
             elif self.source.currentData()=='gamepad' and self.controllers.current is None:message='No mapped PC controller. Input stays neutral until it reconnects.'
             elif status['needs_neutral']:message='Centre sticks and release all controls to begin.'
             else:message=f"Controller active · {status['rate_hz']} Hz · Esc or F8 releases."
-        elif self.starting:message='Starting a controller session…'
-        elif self.online:message='Connected. Select Wi-Fi remote, then take control when ready.'
+        elif self.starting:message='Selecting Wi-Fi input and starting a controller session…'
+        elif self.online:message='Connected. Take control automatically selects Wi-Fi input.'
         self.control_message.setText(message)
         p=status.get('pad',dataclasses.asdict(PadState()))
         for name,b in self.pad_buttons.items():
