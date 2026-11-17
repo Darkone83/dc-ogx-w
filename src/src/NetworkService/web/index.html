@@ -1605,6 +1605,12 @@
               <p class="device-copy">0.91-inch SSD1306 · 128×32 · I²C1 on GP14 / GP15. Settings apply without reboot; Save writes them to the adapter for future boots.</p>
               <form id="oled-form" class="settings-form">
                 <label class="check"><input id="oled-enabled" type="checkbox" checked /> Display enabled</label>
+                <label>Screen orientation
+                  <select id="oled-orientation" aria-label="OLED screen orientation">
+                    <option value="0">Normal (0°)</option>
+                    <option value="180">Rotated / upside down (180°)</option>
+                  </select></label>
+                <p class="device-copy">Choose the orientation for your enclosure. Select an angle and click <strong>Apply now</strong> to preview; use <strong>Save and restart</strong> to keep it after power cycling.</p>
                 <label>Brightness <output id="oled-brightness-value" for="oled-brightness">88%</output>
                   <input id="oled-brightness" type="range" min="0" max="255" value="224" /></label>
                 <label>Dim after inactivity
@@ -1623,8 +1629,7 @@
                     <option value="600">10 minutes</option><option value="900">15 minutes</option>
                     <option value="1800">30 minutes</option><option value="3600">1 hour</option>
                   </select></label>
-                <label class="check"><input id="oled-invert" type="checkbox" /> Invert pixels</label>
-                <label class="check"><input id="oled-flip" type="checkbox" /> Rotate 180°</label>
+                <label class="check"><input id="oled-invert" type="checkbox" /> Invert pixels (light/dark)</label>
                 <label class="check"><input id="oled-fade" type="checkbox" checked /> Fade in on startup</label>
                 <p class="device-copy" id="oled-message" role="status" aria-live="polite">Reading OLED settings…</p>
                 <div class="settings-actions">
@@ -1639,7 +1644,7 @@
               <h2>Display behavior</h2>
               <p class="device-copy">The startup mark gives way to network address, active profile, USB/remote status, and Wi-Fi screens. When a controller connects, an extra Bluetooth or wired USB page shows its controller family. Save, apply, and firmware operations temporarily interrupt the rotation with status glyphs and progress.</p>
               <p class="device-copy">Idle timeouts reset on meaningful state changes and display-setting edits. Screen off uses the SSD1306 display-off command; it does not remove power from the OLED module. A later activity event wakes it.</p>
-              <p class="device-copy">Brightness is SSD1306 contrast, not a backlight adjustment. Inverted and rotated modes apply immediately.</p>
+              <p class="device-copy">Brightness is SSD1306 contrast, not a backlight adjustment. OLED orientation changes are handled by the controller hardware (segment remap and COM scan direction), without copying or rotating the framebuffer in software.</p>
               <p class="device-copy" data-config-gate hidden>Enter Configuration mode to modify OLED settings while console input is neutral.
                 <button type="button" data-set-mode="configure">Enter configuration</button></p>
             </div>
@@ -1888,7 +1893,8 @@
       let controlWanted = false, reconnectTimer = null, reconnectAttempts = 0,
         controlEpoch = 0, recovering = false, gamepadNeedsNeutral = true,
         lastPingAt = 0, pingId = 0, pingSupported = false,
-        bluetoothSupported = null, physicalSupported = null, inputMode = "physical", modePending = false, modeBusy = false, modeSelectionDirty = false,
+        bluetoothSupported = null, physicalSupported = null, inputMode = "physical", modePending = false, modeStalled = false,
+        modePendingObservedAt = 0, lastModeGeneration = null, modeBusy = false, modeSelectionDirty = false,
         calibration = null, calibrationBusy = false, calibrationTimer = null, calibrationLoading = false;
       let maintenanceBusy = false, remoteMaintenance = false, deviceLoaded = false,
         deviceLoading = false, updateActionBusy = false, updateToken = null,
@@ -2643,25 +2649,46 @@
         if (typeof supported === "boolean") bluetoothSupported = supported;
         if (["physical", "wifi", "configure"].includes(state.mode)) inputMode = state.mode;
         if (lastStatus && state.mode) lastStatus.control = { ...lastStatus.control, ...state };
-        modePending = Boolean(state.mode_pending);
+        if (typeof state.mode_pending === "boolean") {
+          if (state.mode_pending && !modePending) modePendingObservedAt = performance.now();
+          if (!state.mode_pending) modePendingObservedAt = 0;
+          modePending = state.mode_pending;
+        }
+        if (Number.isInteger(state.mode_generation) && state.mode_generation !== lastModeGeneration) {
+          lastModeGeneration = state.mode_generation;
+          if (modePending) modePendingObservedAt = performance.now();
+        }
+        // Firmware reports the pending phase. A 6s browser-side fallback also
+        // permits a manual retry when talking to an older firmware version.
+        const liveModeInfo = typeof state.mode_pending === "boolean" ||
+          typeof state.mode_stalled === "boolean" || typeof state.mode_pending_age_ms === "number";
+        modeStalled = modePending && ((liveModeInfo && (state.mode_stalled === true ||
+          Number(state.mode_pending_age_ms || 0) >= 5000)) ||
+          (modeStalled && !liveModeInfo) ||
+          (modePendingObservedAt > 0 && performance.now() - modePendingObservedAt >= 6000));
+        const modeLocked = modeBusy || (modePending && !modeStalled) || maintenanceBusy || remoteMaintenance;
         $("input-mode-card").hidden = physicalSupported !== true;
         $("tab-calibration").hidden = bluetoothSupported !== true;
         $("tab-remapping").hidden = physicalSupported !== true;
         $("open-hardware-calibration").hidden = bluetoothSupported !== true;
-        if (!modeSelectionDirty || modeBusy || modePending) $("input-mode").value = state.requested_mode || inputMode;
-        $("input-mode").disabled = modeBusy || modePending || maintenanceBusy || remoteMaintenance;
-        $("apply-input-mode").disabled = $("input-mode").disabled;
+        if (!modeSelectionDirty || modeBusy || (modePending && !modeStalled)) $("input-mode").value = state.requested_mode || inputMode;
+        $("input-mode").disabled = modeLocked;
+        $("apply-input-mode").disabled = modeLocked;
+        $("apply-input-mode").textContent = modeStalled ? "Retry mode handoff" : "Change mode";
         $("source-policy").textContent = physicalSupported === true
           ? "Choose Physical controller, Wi-Fi remote control, or Configuration. Releasing Wi-Fi control leaves console input neutral."
           : "Wi-Fi control remains available. Temporary connection loss sends neutral input and reconnects your session.";
-        $("input-mode-message").textContent = modePending ? "Changing input mode; USB output is neutral…"
+        $("input-mode-message").textContent = modeStalled
+          ? "Mode handoff stalled at " + (state.mode_phase || "unknown") +
+            ". Select a mode and retry; USB output stays neutral until both cores acknowledge."
+          : modePending ? "Changing input mode; USB output is neutral…"
           : inputMode === "physical" ? "The physical controller drives console USB. Select Wi-Fi mode before taking remote control."
           : inputMode === "configure" ? "Configuration: console USB output is neutral while you edit settings."
           : "Wi-Fi mode: remote input drives console USB; physical controller input is paused.";
         document.querySelectorAll("[data-config-gate]").forEach((el) =>
           (el.hidden = physicalSupported !== true || (inputMode === "configure" && !modePending)));
         document.querySelectorAll("[data-set-mode]").forEach((el) =>
-          (el.disabled = modeBusy || modePending || maintenanceBusy || remoteMaintenance));
+          (el.disabled = modeLocked));
         if (controlWanted && physicalSupported === true && (inputMode !== "wifi" || modePending))
           void releaseControl("Input mode changed. Remote control released.");
         if (profile && (wasBluetooth !== bluetoothSupported || wasPhysical !== physicalSupported)) moveRemapping();
@@ -2670,12 +2697,12 @@
         renderCalibrationButtons();
       }
       async function changeInputMode(mode) {
-        if (modeBusy || modePending || maintenanceBusy || remoteMaintenance) return;
+        if (modeBusy || (modePending && !modeStalled) || maintenanceBusy || remoteMaintenance) return;
         modeSelectionDirty = false;
         modeBusy = true;
-        await releaseControl("Changing input mode. USB output will stay neutral during the handoff.");
-        renderInputMode();
         try {
+          await releaseControl("Changing input mode. USB output will stay neutral during the handoff.");
+          renderInputMode();
           let state;
           try { state = await api("/api/control/mode", { mode }); }
           catch (error) {
@@ -2691,7 +2718,9 @@
             state = await api("/api/control/mode");
             renderInputMode(state);
           }
-          if (state.mode_pending) throw new Error("Mode change is still pending. Wait for status before continuing.");
+          if (state.mode_pending) throw new Error(
+            "Mode handoff is still pending at " + (state.mode_phase || "unknown") +
+            ". If it persists, you can retry without restarting the adapter.");
           if (activeTab === "calibration") await loadCalibration();
         } catch (error) {
           $("input-mode-message").textContent = error.message;
@@ -2700,8 +2729,9 @@
         } finally {
           modeBusy = false;
           // Retain the latest direct mode response until the next status poll.
-          $("input-mode").disabled = $("apply-input-mode").disabled = modePending || maintenanceBusy || remoteMaintenance;
-          document.querySelectorAll("[data-set-mode]").forEach((el) => (el.disabled = modePending || maintenanceBusy || remoteMaintenance));
+          // A delayed handoff is recoverable. Do not permanently disable the
+          // only controls that can request a fresh handoff generation.
+          renderInputMode();
           setButtons(); updateProfileButtons(); renderCalibrationButtons(); deviceButtons();
         }
       }
@@ -3602,11 +3632,12 @@
         $("oled-dim-timeout").value = String(settings.dim_after_s);
         $("oled-off-timeout").value = String(settings.off_after_s);
         $("oled-invert").checked = Boolean(settings.invert);
-        $("oled-flip").checked = Boolean(settings.flip);
+        $("oled-orientation").value = settings.flip ? "180" : "0";
         $("oled-fade").checked = Boolean(settings.fade);
         updateOledValues();
         $("oled-status").textContent = !settings.available ? "Not compiled" :
-          settings.detected === false ? "Not detected" : settings.enabled ? "Enabled" : "Disabled";
+          settings.detected === false ? "Not detected" : settings.enabled ?
+            "Enabled · " + (settings.flip ? "180°" : "0°") : "Disabled";
       }
       function updateOledValues() {
         $("oled-brightness-value").textContent = Math.round(Number($("oled-brightness").value) / 255 * 100) + "%";
@@ -3618,7 +3649,7 @@
           idle_brightness: Number($("oled-idle-brightness").value),
           dim_after_s: Number($("oled-dim-timeout").value),
           off_after_s: Number($("oled-off-timeout").value),
-          invert: $("oled-invert").checked, flip: $("oled-flip").checked,
+          invert: $("oled-invert").checked, flip: $("oled-orientation").value === "180",
           fade: $("oled-fade").checked };
       }
       async function loadOled() {

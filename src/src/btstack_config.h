@@ -18,6 +18,14 @@
 #define HCI_OUTGOING_PRE_BUFFER_SIZE 4
 #define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
 #define HCI_ACL_CHUNK_SIZE_ALIGNMENT 4
+
+// BTstack and Wi-Fi share the SDK async context. Yield after a bounded HCI
+// receive batch so idle discovery traffic cannot monopolize that context and
+// delay Wi-Fi, connection timeouts, or pairing recovery. OLED power is separate.
+#ifndef PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT
+#define PICO_BTSTACK_CYW43_MAX_HCI_PROCESS_LOOP_COUNT 8
+#endif
+
 #define MAX_NR_AVDTP_CONNECTIONS 1
 #define MAX_NR_AVDTP_STREAM_ENDPOINTS 1
 #define MAX_NR_AVRCP_CONNECTIONS 2

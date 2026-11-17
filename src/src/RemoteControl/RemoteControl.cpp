@@ -67,6 +67,16 @@ constexpr bool PHYSICAL_SUPPORTED = false;
 // USB and Bluetooth are physical input sources on the same controller runtime.
 constexpr Mode BOOT_MODE = PHYSICAL_SUPPORTED ? Mode::Physical : Mode::Wifi;
 std::atomic<Mode> requested_mode{BOOT_MODE}, applied_mode{BOOT_MODE}, radio_mode{BOOT_MODE};
+// One generation per explicit HTTP handoff. The radio and Core0 must both
+// acknowledge THAT request; an old acknowledgement cannot complete a retry.
+std::atomic<uint32_t> mode_request_generation{0};
+std::atomic<uint32_t> mode_radio_generation{0};
+std::atomic<uint32_t> mode_core_generation{0};
+std::atomic<uint32_t> mode_requested_at{0};
+std::atomic<uint32_t> core_heartbeat_at{0};
+uint32_t core_target_generation{}; // Core0 only
+uint32_t core_heartbeat_published{}; // Core0 only
+constexpr uint32_t MODE_STALLED_MS = 5000;
 std::atomic<bool> bluetooth_connected{false};
 std::atomic<uint32_t> bluetooth_generation{0};
 Mode core_mode_target = BOOT_MODE;
@@ -203,21 +213,40 @@ void bump_revision() { if (!++shared.revision) ++shared.revision; }
 
 bool mode_pending() {
     const Mode requested = requested_mode.load(std::memory_order_acquire);
+    const uint32_t generation = mode_request_generation.load(std::memory_order_acquire);
     return requested != applied_mode.load(std::memory_order_acquire) ||
-           requested != radio_mode.load(std::memory_order_acquire);
+           requested != radio_mode.load(std::memory_order_acquire) ||
+           mode_radio_generation.load(std::memory_order_acquire) != generation ||
+           mode_core_generation.load(std::memory_order_acquire) != generation;
 }
 
-void write_mode(JsonWriter& writer) {
+void write_mode(JsonWriter& writer, uint32_t now) {
     const Mode requested = requested_mode.load(std::memory_order_acquire);
+    const uint32_t generation = mode_request_generation.load(std::memory_order_acquire);
+    const bool pending = mode_pending();
+    const uint32_t elapsed = pending ? uint32_t(now - mode_requested_at.load(std::memory_order_acquire)) : 0;
+    const bool radio_ready = requested == radio_mode.load(std::memory_order_acquire) &&
+        mode_radio_generation.load(std::memory_order_acquire) == generation;
+    const bool core_ready = requested == applied_mode.load(std::memory_order_acquire) &&
+        mode_core_generation.load(std::memory_order_acquire) == generation;
+    const uint32_t last_core = core_heartbeat_at.load(std::memory_order_acquire);
     writer.append("\"mode\":\"%s\",\"requested_mode\":\"%s\",\"mode_pending\":%s,"
                   "\"physical_supported\":%s,\"bluetooth_supported\":%s,\"bluetooth_connected\":%s,\"bluetooth_allowed\":%s,"
                   "\"usb_suppressed\":%s",
                   mode_name(applied_mode.load(std::memory_order_acquire)), mode_name(requested),
-                  mode_pending() ? "true" : "false", PHYSICAL_SUPPORTED ? "true" : "false",
+                  pending ? "true" : "false", PHYSICAL_SUPPORTED ? "true" : "false",
                   BLUETOOTH_SUPPORTED ? "true" : "false",
                   bluetooth_connected.load(std::memory_order_acquire) ? "true" : "false",
                   BLUETOOTH_SUPPORTED && requested != Mode::Wifi ? "true" : "false",
-                  requested == Mode::Configure || mode_pending() || profile_apply_pending() || maintenance.load() ? "true" : "false");
+                  requested == Mode::Configure || pending || profile_apply_pending() || maintenance.load() ? "true" : "false");
+    // Read-only diagnostics: show whether the RADIO or USB/CORE0 side failed
+    // to acknowledge. Never forcibly fall back to physical input on timeout.
+    writer.append(",\"mode_generation\":%lu,\"mode_pending_age_ms\":%lu,"
+                  "\"mode_stalled\":%s,\"mode_phase\":\"%s\",\"mode_core_tick_age_ms\":%lu",
+                  static_cast<unsigned long>(generation), static_cast<unsigned long>(elapsed),
+                  pending && elapsed >= MODE_STALLED_MS ? "true" : "false",
+                  !pending ? "ready" : !radio_ready ? "radio" : !core_ready ? "core" : "settling",
+                  static_cast<unsigned long>(uint32_t(now - last_core)));
 }
 
 
@@ -266,10 +295,10 @@ HttpResult finish(JsonWriter& writer, char* output, size_t capacity,
     return {status, writer.length(), save};
 }
 
-HttpResult get_mode(char* output, size_t capacity, uint16_t status = 200) {
+HttpResult get_mode(char* output, size_t capacity, uint32_t now, uint16_t status = 200) {
     JsonWriter writer(output, capacity);
     writer.append("{\"ok\":true,");
-    write_mode(writer);
+    write_mode(writer, now);
     writer.append("}");
     return finish(writer, output, capacity, status);
 }
@@ -539,7 +568,7 @@ HttpResult get_status(char* output, size_t capacity, uint32_t now) {
                   static_cast<unsigned long>(expired), static_cast<unsigned long>(rejected),
                   static_cast<unsigned long>(dropped), static_cast<unsigned long>(snapshot.applied_seq),
                   snapshot.has_applied_seq ? "true" : "false");
-    write_mode(writer);
+    write_mode(writer, now);
     writer.append("},\"output_source\":\"%s\",\"processed\":",
                   snapshot.source == Source::Remote ? "remote" : snapshot.source == Source::Neutral ? "neutral" : "local");
     write_pad(writer, snapshot.processed);
@@ -611,6 +640,12 @@ void begin(Gamepad& local, DeviceDriverType driver) {
     requested_mode.store(BOOT_MODE);
     applied_mode.store(BOOT_MODE);
     radio_mode.store(BOOT_MODE);
+    mode_request_generation.store(0, std::memory_order_release);
+    mode_radio_generation.store(0, std::memory_order_release);
+    mode_core_generation.store(0, std::memory_order_release);
+    mode_requested_at.store(0, std::memory_order_release);
+    core_heartbeat_at.store(0, std::memory_order_release);
+    core_target_generation = core_heartbeat_published = 0;
     bluetooth_connected.store(false);
     bluetooth_generation.store(0);
     core_mode_target = BOOT_MODE;
@@ -635,12 +670,17 @@ bool profile_apply_pending() {
 }
 
 void apply_profile_on_radio_core() {
+    const uint32_t generation = mode_request_generation.load(std::memory_order_acquire);
     const Mode wanted = requested_mode.load(std::memory_order_acquire);
-    if (wanted != radio_mode.load(std::memory_order_relaxed)) {
+    if (wanted != radio_mode.load(std::memory_order_relaxed) ||
+        generation != mode_radio_generation.load(std::memory_order_relaxed)) {
 #if defined(CONFIG_EN_BLUETOOTH)
+        // Revisit an explicitly retried handoff even if the target mode did
+        // not change. Bluepad32 keeps its own idempotent radio-state guard.
         bluepad32::set_remote_wifi_mode(wanted == Mode::Wifi);
 #endif
         radio_mode.store(wanted, std::memory_order_release);
+        mode_radio_generation.store(generation, std::memory_order_release);
     }
     unsigned expected = Ready;
     if (!apply_stage.compare_exchange_strong(expected, Applying, std::memory_order_acq_rel)) return;
@@ -689,6 +729,12 @@ void service_network_requests() {
 
 void tick(uint32_t now_ms) {
     if (!initialized) return;
+    // Publish one low-cost heartbeat per 100ms (not on every USB iteration).
+    // A still-responsive HTTP endpoint can diagnose a missing Core0 handoff.
+    if (uint32_t(now_ms - core_heartbeat_published) >= 100u) {
+        core_heartbeat_published = now_ms;
+        core_heartbeat_at.store(now_ms, std::memory_order_release);
+    }
 
     if (apply_stage.load(std::memory_order_acquire) == RadioDone) {
         physical_pad->set_profile(profile_to_apply, output_driver);
@@ -705,9 +751,11 @@ void tick(uint32_t now_ms) {
         apply_stage.store(CoreDone, std::memory_order_release);
     }
 
+    const uint32_t mode_generation = mode_request_generation.load(std::memory_order_acquire);
     const Mode desired_mode = requested_mode.load(std::memory_order_acquire);
-    if (desired_mode != core_mode_target) {
+    if (desired_mode != core_mode_target || mode_generation != core_target_generation) {
         core_mode_target = desired_mode;
+        core_target_generation = mode_generation;
         mode_handoff = true;
         mode_handoff_started = now_ms;
         have_remote_raw = false;
@@ -718,9 +766,11 @@ void tick(uint32_t now_ms) {
         core_snapshot.has_applied_seq = false;
     }
     if (mode_handoff && radio_mode.load(std::memory_order_acquire) == desired_mode &&
+        mode_radio_generation.load(std::memory_order_acquire) == mode_generation &&
         uint32_t(now_ms - mode_handoff_started) >= NEUTRAL_HANDOFF_MS) {
         mode_handoff = false;
         applied_mode.store(desired_mode, std::memory_order_release);
+        mode_core_generation.store(mode_generation, std::memory_order_release);
         // Discard captured configuration/old-owner buttons. A new physical
         // report is required after the explicit transition back to physical.
         drain_physical_to_latest();
@@ -944,7 +994,7 @@ HttpResult handle_request(const char* method, const char* path,
         if (!std::strcmp(path, "/api/status")) return get_status(output, capacity, now);
         if (!std::strcmp(path, "/api/profile")) return get_profile(output, capacity);
         if (!std::strcmp(path, "/api/profiles")) return get_profiles(output, capacity);
-        if (!std::strcmp(path, "/api/control/mode")) return get_mode(output, capacity);
+        if (!std::strcmp(path, "/api/control/mode")) return get_mode(output, capacity, now);
         if (!std::strcmp(path, "/api/calibration")) return get_calibration(output, capacity, now);
         return error_response(output, capacity, 404, "not_found");
     }
@@ -972,14 +1022,19 @@ HttpResult handle_request(const char* method, const char* path,
             return error_response(output, capacity, 409, "physical_not_supported");
         if (!try_lock_network()) return error_response(output, capacity, 503, "service_busy");
         if (shared.save_pending) { unlock(); return error_response(output, capacity, 409, "save_pending_restart"); }
-        if (wanted != requested_mode.load(std::memory_order_relaxed)) {
+        // An explicit POST of the same mode while pending is a real retry,
+        // unlike a GET/status poll. Re-arm BOTH acknowledgements without
+        // switching to a different input source or rebooting the adapter.
+        if (wanted != requested_mode.load(std::memory_order_relaxed) || mode_pending()) {
             shared.lease.clear();
             publish_owner(now);
             shared.capture = Capture{};
             requested_mode.store(wanted, std::memory_order_release);
+            mode_requested_at.store(now, std::memory_order_release);
+            mode_request_generation.fetch_add(1, std::memory_order_acq_rel);
         }
         unlock();
-        return get_mode(output, capacity, mode_pending() ? 202 : 200);
+        return get_mode(output, capacity, now, mode_pending() ? 202 : 200);
     }
     if (!std::strcmp(path, "/api/calibration")) return calibration_request(json, output, capacity, now);
     if ((!std::strcmp(path, "/api/control/input") || !std::strcmp(path, "/api/control/acquire") ||

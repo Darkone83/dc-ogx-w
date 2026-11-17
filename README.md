@@ -1,7 +1,19 @@
+<<<<<<< Updated upstream
+# dc-ogx-w
+An OGX mini firmware for Pico w and Pico W clone firmware with built-in web control
+=======
 # DC-OGX-W
 
 <div align="center">
   <img src="assets/branding/repo-banner.jpg" alt="DC-OGX-W by Darkone Customs" width="900" />
+</div>
+
+<div align="center">
+  <img src="images/Front.png" alt="DC-OGX-W assembled adapter, front view with OLED and status LED" width="750" />
+  <p><sub>Assembled DC-OGX-W board</sub></p>
+  <img src="images/Back.png" alt="DC-OGX-W PCB rear with Darkone Customs artwork" width="345" />
+  <img src="images/Case.png" alt="DC-OGX-W adapter in its translucent 3D-printed enclosure" width="345" />
+  <p><sub>PCB back and 3D-printed enclosure</sub></p>
 </div>
 
 **An RP2040-based controller adapter for the original Xbox and compatible USB output modes.** DC-OGX-W combines a self-hosted WebUI, Wi-Fi remote input, controller profiles, an optional 0.91-inch OLED, and an RGB status LED. The project builds on OGX-Mini and is maintained by **Darkone83 / Darkone Customs**.
@@ -55,6 +67,11 @@ Connect to the adapter's SoftAP, usually `dc-ogx-w-XXXX`, with password `ogxremo
 
 The embedded UI includes **Control, Profiles, Wi-Fi, LED and Device**, desktop sidebar/mobile drawer, eight appearance themes, remappable keyboard controls (including original Xbox White and Black), device profiles/calibration, OLED configuration, and firmware updating. The browser-based gamepad preview is a **local approximation**, not measured controller output. UI assets are embedded without a CDN. See [WebUI themes](docs/WEBUI_THEMES.md), [OLED UI](docs/OLED_UI.md), and [remote API](docs/remote-api.md).
 
+<div align="center">
+  <img src="images/webui.png" alt="DC-OGX-W self-hosted WebUI: controller input, on-screen controls, and remapping" width="900" />
+  <p><sub>DC-OGX-W self-hosted WebUI</sub></p>
+</div>
+
 ## Desktop companions
 
 **Windows:** run the supplied [`apps/Windows/bin/dc-ogx-w.exe`](apps/Windows/bin/dc-ogx-w.exe) or build the portable Tauri/Rust app from [`apps/Windows/src/`](apps/Windows/src/). It uses the adapter's HTTP/WebSocket control APIs, supports keyboard/XInput input, controller White/Black buttons, settings, profiles and discovery when supported by firmware. Full advanced profile editing and firmware upload remain in the device WebUI. The binary in this archive has **not** been independently verified against the latest source patch.
@@ -71,3 +88,4 @@ The 0.91-inch SSD1306 display is **128×32**, connected over I²C1. The WebUI su
 - [Software architecture](docs/SW_FRAMEWORK.md) · [USB host](docs/USB_HOST.md) · [API](docs/remote-api.md)
 
 **Attribution:** Darkone83 / Darkone Customs; derived from [MegaCadeDev/OGX-Mini-2026](https://github.com/MegaCadeDev/OGX-Mini-2026) and [wiredopposite/OGX-Mini](https://github.com/wiredopposite/OGX-Mini). Preserve all applicable upstream licenses and notices.
+>>>>>>> Stashed changes

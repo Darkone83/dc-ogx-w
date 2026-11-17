@@ -385,8 +385,8 @@ static void bp32_disconnect_controller_and_joycon_partner(uni_hid_device_t* d) {
 
 static constexpr uint32_t FEEDBACK_TIME_MS = 250;
 static constexpr uint32_t LED_CHECK_TIME_MS = 500;
-/** Idle pairing health check — restarts BR/LE scan if they died during long USB suspend (e.g. 360 standby). */
-static constexpr uint32_t PAIRING_WATCHDOG_MS = 45000;
+/** Repair idle pairing promptly after a controller sleeps or loses its link. */
+static constexpr uint32_t PAIRING_WATCHDOG_MS = 5000;
 /** If no HID input report reaches us for this long while "connected", the BT link is zombie
  *  (L2CAP stops delivering; OG Xbox then holds last USB report). Force disconnect so user can reconnect. */
 static constexpr uint32_t BT_INPUT_STALL_DISCONNECT_MS = 8000;
@@ -988,29 +988,34 @@ static void drop_incomplete_ble_slots(void) {
 static void restore_bt_pairing_mode(int disconnected_idx);
 
 #if defined(CONFIG_EN_BLUETOOTH) && defined(CONFIG_TARGET_PICO_W)
-/** True while a BLE pad is connected but not yet DEVICE_READY (pairing / DIS / HIDS). */
-static bool any_ble_connect_in_progress() {
+/** Protect both Classic SDP/L2CAP and BLE DIS/HIDS setup from idle recovery. */
+static bool any_bt_connect_in_progress() {
     for (uint8_t i = 0; i < CONFIG_BLUEPAD32_MAX_DEVICES; ++i) {
         uni_hid_device_t* d = uni_hid_device_get_instance_for_idx(static_cast<int>(i));
-        if (!d || d->conn.handle == UNI_BT_CONN_HANDLE_INVALID)
+        if (!d || uni_hid_device_is_virtual_device(d))
             continue;
-        if (uni_bt_conn_get_state(&d->conn) == UNI_BT_CONN_STATE_DEVICE_READY)
-            continue;
-        if (gap_get_connection_type(d->conn.handle) == GAP_CONNECTION_LE)
+        const auto state = uni_bt_conn_get_state(&d->conn);
+        if (state > UNI_BT_CONN_STATE_DEVICE_NONE && state < UNI_BT_CONN_STATE_DEVICE_READY)
             return true;
     }
     return false;
 }
 
-static bool is_pairing_idle() {
-    if (!remote_bt_allowed()) return false;
+static bool pairing_recovery_allowed() {
+    if (!remote_bt_allowed() || hci_get_state() != HCI_STATE_WORKING ||
+        s_bt_quiet_for_usb_pending.load(std::memory_order_acquire)) return false;
 #if defined(CONFIG_EN_USB_HOST)
     if (board_api::usb::host_any_pad_mounted())
         return false;
 #endif
-    /* Mid HOGP discovery still looks "disconnected" to bt_devices_[], but scans
-     * must stay off or Triton's HIDS discovery never finishes. */
-    if (any_ble_connect_in_progress())
+    return true;
+}
+
+static bool is_pairing_idle() {
+    if (!pairing_recovery_allowed()) return false;
+    // A new Classic connection may not have an HCI handle yet. Do not
+    // restart inquiry over its name/SDP/L2CAP work, or over BLE setup.
+    if (any_bt_connect_in_progress())
         return false;
     return !any_connected();
 }
@@ -1019,6 +1024,10 @@ static bool is_pairing_idle() {
 static void ensure_idle_pairing_scans(int disconnected_idx) {
     if (!is_pairing_idle())
         return;
+    // Discovery and incoming/page scan are separate gates. Restore all of
+    // them after an idle handoff, while respecting explicit Wi-Fi/USB modes.
+    uni_bt_allow_incoming_connections(true);
+    gap_connectable_control(1);
     maybe_restart_bredr_inquiry_after_disconnect(disconnected_idx);
     maybe_restart_ble_scan_after_disconnect(disconnected_idx);
     ogxm_resume_ble_ads_if_no_acl_pad(disconnected_idx);
@@ -1027,8 +1036,10 @@ static void ensure_idle_pairing_scans(int disconnected_idx) {
 }
 
 static btstack_timer_source_t s_pairing_watchdog_timer;
+static void reconcile_stale_bt_links();
 
 static void pairing_watchdog_cb(btstack_timer_source_t* ts) {
+    reconcile_stale_bt_links();
     ensure_idle_pairing_scans(-1);
     btstack_run_loop_set_timer(ts, PAIRING_WATCHDOG_MS);
     btstack_run_loop_add_timer(ts);
@@ -1169,6 +1180,42 @@ static void device_disconnected_cb(uni_hid_device_t* device) {
         printf("[BP32] Pairing mode on — Classic/non-Xbox-BLE reconnect without reboot\n");
     }
 }
+
+#if defined(CONFIG_EN_BLUETOOTH) && defined(CONFIG_TARGET_PICO_W)
+static void reconcile_stale_bt_links() {
+    if (!pairing_recovery_allowed()) return;
+    for (uint8_t i = 0; i < CONFIG_BLUEPAD32_MAX_DEVICES; ++i) {
+        auto* device = uni_hid_device_get_instance_for_idx(static_cast<int>(i));
+        if (!device || uni_hid_device_is_virtual_device(device)) continue;
+        if (!bt_devices_[i].connected &&
+            uni_bt_conn_get_state(&device->conn) != UNI_BT_CONN_STATE_DEVICE_READY) continue;
+        if (device->conn.handle != UNI_BT_CONN_HANDLE_INVALID &&
+            gap_get_connection_type(device->conn.handle) != GAP_CONNECTION_INVALID) continue;
+
+        // An idle controller with a live HCI link is valid. Only reconcile a
+        // READY/application slot whose underlying link has actually gone.
+        // Use the pinned stack's normal teardown/delete path to release HIDS,
+        // parser timers and any virtual child before reusing its slot.
+        uni_hid_device_disconnect(device);
+        if (bt_devices_[i].connected) device_disconnected_cb(device);
+        uni_hid_device_delete(device);
+    }
+    bool connected = false;
+    for (uint8_t i = 0; i < CONFIG_BLUEPAD32_MAX_DEVICES; ++i) {
+        auto* device = uni_hid_device_get_instance_for_idx(static_cast<int>(i));
+        if (bt_devices_[i].connected && device && !uni_hid_device_is_virtual_device(device) &&
+            device->conn.handle != UNI_BT_CONN_HANDLE_INVALID &&
+            gap_get_connection_type(device->conn.handle) != GAP_CONNECTION_INVALID) {
+            connected = true;
+            break;
+        }
+    }
+    s_bt_any_connected_cached.store(connected, std::memory_order_release);
+#if defined(CONFIG_OGXM_NETWORK)
+    RemoteControl::note_bluetooth_connected(connected);
+#endif
+}
+#endif
 
 static void ogxm_play_connection_rumble(uni_hid_device_t* device)
 {

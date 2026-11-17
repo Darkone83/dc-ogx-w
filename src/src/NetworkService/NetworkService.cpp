@@ -1383,6 +1383,10 @@ bool start() {
 }
 
 void poll() {
+    // Handoff acknowledgement must not wait behind modem command processing,
+    // stale TCP retries or an HTTP client that has resumed after long idle.
+    // Runs on the serialized radio core, never a USB interrupt/callback.
+    RemoteControl::apply_profile_on_radio_core();
     refresh_transport_guard();
     Transport::poll(now_ms());
     // Parse requests and format responses on the radio core. Core0 exchanges
@@ -1411,10 +1415,6 @@ void poll() {
             pending_action.store(SaveAction::None, std::memory_order_release);
         }
     }
-    // On Pico W the BTstack timer runs in the SDK radio async context. On the
-    // ESP backend this is the Core1 loop; USB parsing belongs to Core0.
-    // This operation is bounded and never waits, allocates, or touches flash.
-    RemoteControl::apply_profile_on_radio_core();
     const auto transport = Transport::status();
     const bool station_failed = transport.station_configured && !transport.station_connected &&
         !transport.station_joining && transport.station_error[0] &&
