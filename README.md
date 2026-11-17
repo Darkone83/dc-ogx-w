@@ -14,7 +14,7 @@
 
 **An RP2040-based controller adapter for the original Xbox and compatible USB output modes.** DC-OGX-W combines a self-hosted WebUI, Wi-Fi remote input, controller profiles, an optional 0.91-inch OLED, and an RGB status LED. The project builds on OGX-Mini and is maintained by **Darkone83 / Darkone Customs**.
 
-**Firmware source version:** `0.2.4` in this repository snapshot. Check the board identity and firmware version of bundled images before flashing.
+**Firmware source version:** `0.2.5` in this repository snapshot. Check the board identity and firmware version of bundled images before flashing.
 
 ## Repository layout
 
