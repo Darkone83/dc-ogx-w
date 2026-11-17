@@ -1,7 +1,3 @@
-<<<<<<< Updated upstream
-# dc-ogx-w
-An OGX mini firmware for Pico w and Pico W clone firmware with built-in web control
-=======
 # DC-OGX-W
 
 <div align="center">
@@ -88,4 +84,3 @@ The 0.91-inch SSD1306 display is **128×32**, connected over I²C1. The WebUI su
 - [Software architecture](docs/SW_FRAMEWORK.md) · [USB host](docs/USB_HOST.md) · [API](docs/remote-api.md)
 
 **Attribution:** Darkone83 / Darkone Customs; derived from [MegaCadeDev/OGX-Mini-2026](https://github.com/MegaCadeDev/OGX-Mini-2026) and [wiredopposite/OGX-Mini](https://github.com/wiredopposite/OGX-Mini). Preserve all applicable upstream licenses and notices.
->>>>>>> Stashed changes
