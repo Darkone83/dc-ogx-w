@@ -7,7 +7,14 @@
 namespace NetworkService::Transport {
 
 constexpr std::size_t MAX_CONNECTIONS = 3;
+// One complete TCP MSS per write on Pico 2 W reduces the number of pbuf
+// fragments needed to deliver the large embedded WebUI.  Keep 1024-byte
+// chunks on the RP2040/ESP8285 paths for their existing memory and UART limits.
+#if defined(CONFIG_OGXM_BOARD_PI_PICO2W)
+constexpr std::size_t MAX_WRITE_SIZE = 1460;
+#else
 constexpr std::size_t MAX_WRITE_SIZE = 1024;
+#endif
 
 // Nonzero connection generation, not a modem link ID or reusable array index.
 // A new connection must get a new handle, including after a modem restart.

@@ -86,7 +86,15 @@ if(DC_OGX_USB_HOST_ENABLED)
 endif()
 
 # Board capabilities are fixed by the hardware, not independent feature toggles.
-set(SYSCLOCK_KHZ 240000 CACHE STRING "System clock in kHz (shared PIO USB timing)")
+# Pico 2 W has its own overclock target; keep all RP2040 boards at their existing
+# 240 MHz default. The CMake cache/presets can still override this value.
+if(PICO_BOARD STREQUAL "pico2_w")
+    set(_dc_ogx_default_sysclock_khz 270000)
+else()
+    set(_dc_ogx_default_sysclock_khz 240000)
+endif()
+set(SYSCLOCK_KHZ "${_dc_ogx_default_sysclock_khz}" CACHE STRING "System clock in kHz (shared PIO USB timing)")
+unset(_dc_ogx_default_sysclock_khz)
 if(PICO_BOARD STREQUAL "pico2_w")
     set(DC_OGX_HAS_BLUETOOTH TRUE)
     add_compile_definitions(CONFIG_OGXM_BOARD_PI_PICO2W=1 CONFIG_EN_BLUETOOTH=1)

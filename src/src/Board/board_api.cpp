@@ -129,11 +129,17 @@ void init_bluetooth() {
 
 //Call on core0 before any other method
 void init_board() {
-    if (!set_sys_clock_khz(SYSCLOCK_KHZ, true)) {
-        if (!set_sys_clock_khz((SYSCLOCK_KHZ / 2), true)) {
-            panic("Failed to set sys clock");
-        }
+    // A required clock either configures exactly or panics in the Pico SDK.
+    // The previous /2 fallback was unreachable with required=true.
+    set_sys_clock_khz(SYSCLOCK_KHZ, true);
+
+#if defined(CONFIG_OGXM_BOARD_PI_PICO2W)
+    // Verify the actual sysclk before bringing up USB, PIO or the radio.
+    // Never continue with a silently reduced clock on the Pico 2 W.
+    if (clock_get_hz(clk_sys) != (uint32_t)SYSCLOCK_KHZ * 1000u) {
+        panic("Pico 2 W system clock differs from requested SYSCLOCK_KHZ");
     }
+#endif
 
     stdio_init_all();
 

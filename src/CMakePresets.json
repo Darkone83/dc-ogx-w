@@ -57,7 +57,8 @@
             "binaryDir": "${sourceDir}/build/pico2-w",
             "cacheVariables": {
                 "PICO_BOARD": "pico2_w",
-                "PICO_PLATFORM": "rp2350-arm-s"
+                "PICO_PLATFORM": "rp2350-arm-s",
+                "SYSCLOCK_KHZ": "270000"
             }
         }
     ],
