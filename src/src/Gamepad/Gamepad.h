@@ -7,6 +7,7 @@
 #include <cstring>
 #include <array>
 #include <cmath>
+#include <hardware/sync.h>
 #include <pico/mutex.h>
 
 #include "libfixmath/fix16.hpp"
@@ -176,7 +177,13 @@ public:
     ~Gamepad() = default;
 
     //Get
-    inline bool new_pad_in() const { return new_pad_in_.load(); }
+    inline bool new_pad_in() const {
+        // A Bluetooth report can arrive after get_pad_in() drains staging but
+        // before it clears the ordinary queue flag. The staged count remains
+        // authoritative until that report is transferred to the input queue.
+        return new_pad_in_.load(std::memory_order_acquire) ||
+               bt_pad_staged_count_.load(std::memory_order_acquire) != 0;
+    }
     inline bool new_pad_out() const { return new_pad_out_.load(); }
 
     // True if current pad_out has non-zero rumble (read-only, does not clear new_pad_out).
@@ -194,11 +201,24 @@ public:
     inline PadIn get_pad_in()
     {
         mutex_enter_blocking(&pad_in_mutex_);
-        /* Bluetooth HID runs on Core1; never block there on this mutex (would stall HCI/L2CAP).
-         * Latest BT reports are staged lock-free (2 slots) and merged here on Core0. */
-        while (bt_pad_staged_count_.load(std::memory_order_acquire) > 0) {
-            const unsigned ri = bt_pad_staged_read_.load(std::memory_order_relaxed) % BT_PAD_STAGING_SLOTS;
-            const PadIn& p = bt_pending_pads_[ri];
+        // Snapshot both pending reports together. The Bluetooth producer only
+        // shares this short IRQ-safe staging lock, never pad_in_mutex_. Release
+        // it before merging the batch into the ordinary input queue.
+        PadIn staged[BT_PAD_STAGING_SLOTS];
+        unsigned staged_count = 0;
+        if (bt_pad_staged_count_.load(std::memory_order_acquire) != 0) {
+            const uint32_t staging_irq = spin_lock_blocking(bt_staging_lock_);
+            staged_count = bt_pad_staged_count_.load(std::memory_order_relaxed);
+            for (unsigned i = 0; i < staged_count; ++i) {
+                staged[i] = bt_pending_pads_[bt_pad_staged_read_];
+                bt_pad_staged_read_ = (bt_pad_staged_read_ + 1) % BT_PAD_STAGING_SLOTS;
+            }
+            bt_pad_staged_count_.store(0, std::memory_order_release);
+            spin_unlock(bt_staging_lock_, staging_irq);
+        }
+
+        for (unsigned i = 0; i < staged_count; ++i) {
+            const PadIn& p = staged[i];
             if (pad_in_count_ < PAD_IN_QUEUE_SIZE) {
                 pad_in_queue_[pad_in_tail_] = p;
                 pad_in_tail_ = (pad_in_tail_ + 1) % PAD_IN_QUEUE_SIZE;
@@ -208,8 +228,6 @@ public:
                 pad_in_queue_[pad_in_tail_] = p;
                 pad_in_tail_ = (pad_in_tail_ + 1) % PAD_IN_QUEUE_SIZE;
             }
-            bt_pad_staged_read_.store((ri + 1) % BT_PAD_STAGING_SLOTS, std::memory_order_relaxed);
-            bt_pad_staged_count_.fetch_sub(1, std::memory_order_acq_rel);
             new_pad_in_.store(true);
         }
         PadIn pad_in;
@@ -355,19 +373,21 @@ public:
         mutex_exit(&pad_in_mutex_);
     }
 
-    /** Bluetooth (Core1): never blocks on Core0 — avoids stalling the BT stack in HID callbacks. */
+    /** Bluetooth (Core1): only shares the bounded staging copy, never a USB/input mutex. */
     inline void set_pad_in_from_bluetooth(const PadIn& pad_in)
     {
-        if (bt_pad_staged_count_.load(std::memory_order_acquire) >= BT_PAD_STAGING_SLOTS) {
-            const unsigned drop = bt_pad_staged_read_.load(std::memory_order_relaxed) % BT_PAD_STAGING_SLOTS;
-            bt_pad_staged_read_.store((drop + 1) % BT_PAD_STAGING_SLOTS, std::memory_order_relaxed);
-            bt_pad_staged_count_.fetch_sub(1, std::memory_order_acq_rel);
+        const uint32_t staging_irq = spin_lock_blocking(bt_staging_lock_);
+        unsigned count = bt_pad_staged_count_.load(std::memory_order_relaxed);
+        if (count == BT_PAD_STAGING_SLOTS) {
+            // Keep the newest two reports, including a short press/release.
+            bt_pad_staged_read_ = (bt_pad_staged_read_ + 1) % BT_PAD_STAGING_SLOTS;
+            --count;
         }
-        const unsigned wi = bt_pad_staged_write_.load(std::memory_order_relaxed) % BT_PAD_STAGING_SLOTS;
-        bt_pending_pads_[wi] = pad_in;
-        bt_pad_staged_write_.store((wi + 1) % BT_PAD_STAGING_SLOTS, std::memory_order_release);
-        bt_pad_staged_count_.fetch_add(1, std::memory_order_release);
+        bt_pending_pads_[bt_pad_staged_write_] = pad_in;
+        bt_pad_staged_write_ = (bt_pad_staged_write_ + 1) % BT_PAD_STAGING_SLOTS;
+        bt_pad_staged_count_.store(count + 1, std::memory_order_release);
         new_pad_in_.store(true, std::memory_order_release);
+        spin_unlock(bt_staging_lock_, staging_irq);
     }
 
     inline void set_pad_out(const PadOut& pad_out)
@@ -391,10 +411,14 @@ public:
 
     inline void reset_pad_in()
     {
-        bt_pad_staged_write_.store(0, std::memory_order_relaxed);
-        bt_pad_staged_read_.store(0, std::memory_order_relaxed);
-        bt_pad_staged_count_.store(0, std::memory_order_relaxed);
         mutex_enter_blocking(&pad_in_mutex_);
+        // Match the consumer's lock order. A producer arriving after this
+        // staging reset remains pending for the next get_pad_in() call.
+        const uint32_t staging_irq = spin_lock_blocking(bt_staging_lock_);
+        bt_pad_staged_write_ = 0;
+        bt_pad_staged_read_ = 0;
+        bt_pad_staged_count_.store(0, std::memory_order_release);
+        spin_unlock(bt_staging_lock_, staging_irq);
         pad_in_head_ = 0;
         pad_in_tail_ = 0;
         pad_in_count_ = 0;
@@ -516,10 +540,22 @@ public:
     static constexpr unsigned BT_PAD_STAGING_SLOTS = 2;
 
 private:
+    static spin_lock_t* bluetooth_staging_lock() {
+        // Gamepads are constructed before the cores start. Claim one SDK lock
+        // for their lifetime, shared across pads rather than one scarce lock
+        // per instance. Every holder only copies at most two PadIn values and
+        // updates staging indices/count; no callbacks or mutex waits occur.
+        static spin_lock_t* const lock =
+            spin_lock_instance(static_cast<unsigned>(spin_lock_claim_unused(true)));
+        return lock;
+    }
+
     ControllerCalibration bluetooth_calibration_;
+    spin_lock_t* const bt_staging_lock_ = bluetooth_staging_lock();
     PadIn bt_pending_pads_[BT_PAD_STAGING_SLOTS]{};
-    std::atomic<unsigned> bt_pad_staged_write_{0};
-    std::atomic<unsigned> bt_pad_staged_read_{0};
+    unsigned bt_pad_staged_write_{0};
+    unsigned bt_pad_staged_read_{0};
+    // Published separately for new_pad_in(); all mutations hold the staging lock.
     std::atomic<unsigned> bt_pad_staged_count_{0};
     mutex_t pad_in_mutex_;
     mutex_t pad_out_mutex_;

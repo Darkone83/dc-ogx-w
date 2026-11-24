@@ -35,7 +35,7 @@ if(WIN32 AND NOT pioasm_DIR)
     endif()
 endif()
 
-set(PICO_BOARD pico_w_2023 CACHE STRING "Board type")
+set(PICO_BOARD pico_w CACHE STRING "Board type")
 set_property(CACHE PICO_BOARD PROPERTY STRINGS pico_w_2023 pico_w pico2_w)
 if(NOT PICO_BOARD STREQUAL "pico_w" AND NOT PICO_BOARD STREQUAL "pico_w_2023" AND NOT PICO_BOARD STREQUAL "pico2_w")
     message(FATAL_ERROR "Supported boards are pico_w_2023 (ESP8285), pico_w and pico2_w (official CYW43439)")

@@ -387,9 +387,8 @@ static constexpr uint32_t FEEDBACK_TIME_MS = 250;
 static constexpr uint32_t LED_CHECK_TIME_MS = 500;
 /** Repair idle pairing promptly after a controller sleeps or loses its link. */
 static constexpr uint32_t PAIRING_WATCHDOG_MS = 5000;
-/** If no HID input report reaches us for this long while "connected", the BT link is zombie
- *  (L2CAP stops delivering; OG Xbox then holds last USB report). Force disconnect so user can reconnect. */
-static constexpr uint32_t BT_INPUT_STALL_DISCONNECT_MS = 8000;
+static constexpr uint32_t DISCONNECT_COMBO_HOLD_MS = 3000;
+static constexpr uint32_t DISCONNECT_COMBO_GRACE_MS = 3500;
 /** BLE Xbox: host→pad output while idle (no rumble) or controller sleeps link ~1 min */
 static constexpr uint32_t XBOX_BLE_KEEPALIVE_MS = 12000;
 /** Switch 2 Pro BLE drops link (HCI 0x08) without periodic vibration writes. */
@@ -406,13 +405,11 @@ static constexpr uint16_t CONNECT_RUMBLE_DELAY_DEFAULT_MS = 300;
 static uint32_t s_last_bt_input_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 /* BTstack/HIDS reports stop after the first Xbox GET reply in the currently
  * observed failure. Keep a bounded backup GET available from the application's
- * existing Core1 feedback timer, without modifying upstream Bluepad32 code. */
+ * existing Core1 feedback timer, without changing startup input polling. */
 static bool s_bt_seen_hid_report[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 static uint32_t s_xbox_ble_last_recovery_get_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 static uint32_t s_xbox_ble_ka_last_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
 static uint32_t s_sw2_ble_ka_last_ms[CONFIG_BLUEPAD32_MAX_DEVICES]{};
-/** Ignore Start+Select disconnect combo for this long after connect (DS4 can glitch both on first reports). */
-static uint32_t s_bt_disconnect_combo_grace_until_ms[MAX_GAMEPADS]{};
 /** DS4 BT: delay rumble output (host can request rumble immediately; early FF reports can drop link). */
 static uint32_t s_ps4_rumble_ok_ms[MAX_GAMEPADS]{};
 
@@ -426,6 +423,80 @@ btstack_timer_source_t feedback_timer_;
 btstack_timer_source_t led_timer_;
 bool led_timer_set_{false};
 bool feedback_timer_set_{false};
+
+// A Bluetooth slot can map to a different output pad (including slot 1 -> pad 0).
+// Keep hold/lifetime state with the actual connection, never with its output.
+struct DisconnectComboState {
+    uint32_t ready_at_ms{0}, held_since_ms{0};
+    hci_con_handle_t handle{UNI_BT_CONN_HANDLE_INVALID};
+    bool grace_active{false}, held{false};
+};
+static DisconnectComboState s_disconnect_combo[CONFIG_BLUEPAD32_MAX_DEVICES]{};
+
+static void reset_disconnect_combo(int slot, uint32_t now_ms = 0, bool start_grace = false) {
+    if (slot < 0 || slot >= CONFIG_BLUEPAD32_MAX_DEVICES) return;
+    s_disconnect_combo[slot] = {};
+    s_disconnect_combo[slot].ready_at_ms = now_ms;
+    s_disconnect_combo[slot].grace_active = start_grace;
+}
+
+static void clear_disconnect_combo_hold(DisconnectComboState& state) {
+    state.held = false;
+    state.held_since_ms = 0;
+    state.handle = UNI_BT_CONN_HANDLE_INVALID;
+}
+
+static bool disconnect_combo_in_grace(DisconnectComboState& state, uint32_t now_ms) {
+    // Unsigned elapsed time is valid across the millisecond counter rollover.
+    // Once expired, the grace period must not return on a later rollover.
+    if (state.grace_active && static_cast<uint32_t>(now_ms - state.ready_at_ms) >= DISCONNECT_COMBO_GRACE_MS)
+        state.grace_active = false;
+    return state.grace_active;
+}
+
+static bool disconnect_combo_allowed() {
+    if (!remote_bt_allowed()) return false;
+#if defined(CONFIG_OGXM_NETWORK)
+    return RemoteControl::physical_output_enabled();
+#else
+    return true;
+#endif
+}
+
+static void update_disconnect_combo(uni_hid_device_t* device, int slot, bool pressed, uint32_t now_ms) {
+    if (slot < 0 || slot >= CONFIG_BLUEPAD32_MAX_DEVICES) return;
+    auto& state = s_disconnect_combo[slot];
+    if (disconnect_combo_in_grace(state, now_ms) || !pressed || !disconnect_combo_allowed() ||
+        !device || device->conn.handle == UNI_BT_CONN_HANDLE_INVALID) {
+        clear_disconnect_combo_hold(state);
+        return;
+    }
+    if (!state.held || state.handle != device->conn.handle) {
+        state.held = true;
+        state.held_since_ms = now_ms;
+        state.handle = device->conn.handle;
+    }
+}
+
+static bool maybe_disconnect_from_combo(uni_hid_device_t* device, uint8_t slot, uint32_t now_ms) {
+    if (slot >= CONFIG_BLUEPAD32_MAX_DEVICES) return false;
+    auto& state = s_disconnect_combo[slot];
+    if (disconnect_combo_in_grace(state, now_ms) || !disconnect_combo_allowed() || !device ||
+        state.handle == UNI_BT_CONN_HANDLE_INVALID || state.handle != device->conn.handle ||
+        uni_bt_conn_get_state(&device->conn) != UNI_BT_CONN_STATE_DEVICE_READY ||
+        gap_get_connection_type(device->conn.handle) == GAP_CONNECTION_INVALID) {
+        clear_disconnect_combo_hold(state);
+        return false;
+    }
+    if (!state.held || static_cast<uint32_t>(now_ms - state.held_since_ms) < DISCONNECT_COMBO_HOLD_MS)
+        return false;
+    // Run on the existing feedback timer, after input parsing has returned.
+    // This also handles controllers that report only when buttons change.
+    clear_disconnect_combo_hold(state);
+    printf("[BP32] Disconnect combo held for 3s, disconnecting BT slot %u\n", static_cast<unsigned>(slot));
+    bp32_disconnect_controller_and_joycon_partner(device);
+    return true;
+}
 
 /** Core0 USB mux may run before Core1 finishes uni_init(); BTstack asserts if
  *  execute_on_main_thread is used with the_run_loop == NULL (boot loop with pad plugged). */
@@ -631,43 +702,41 @@ static void send_feedback_cb(btstack_timer_source *ts)
         {
             continue;
         }
-        /* BLE Xbox (Series) and Switch 2 BLE may not send reports every poll interval. */
-        const bool skip_stall_disconnect =
-            (bp_device->controller_type == CONTROLLER_TYPE_XBoxOneController && bp_device->hids_cid != 0) ||
-            uni_hid_parser_switch2_is_ble_device(bp_device) ||
-            uni_hid_parser_steam_triton_is_device(bp_device);
-        /* Virtual slot (e.g. DS4's BT "mouse"): never gets gamepad HID → would always stall-disconnect
-         * and drop the real controller. */
-        if (uni_hid_device_is_virtual_device(bp_device))
-            goto after_stall_check;
-        if (uni_hid_parser_switch2_is_joycon_pair_secondary(bp_device))
-            goto after_stall_check;
-        if (bp32_is_joycon_pair_secondary(bp_device))
-            goto after_stall_check;
-        if (!skip_stall_disconnect)
+        // Silence alone is valid for change-only HID reports. Real lost links
+        // are reconciled separately; only an explicit held combo tears down here.
+        if (maybe_disconnect_from_combo(bp_device, i, now_ms)) continue;
+
+        // Resolve feedback before the fallback GET so an overdue idle write
+        // can claim HIDS first. An unmapped slot must still reach recovery below.
+        const int out_i = bp32_get_gamepad_output_idx(bp_device);
+        const int gp_idx = resolve_bt_output_pad_idx(out_i >= 0 ? out_i : static_cast<int>(i));
+        const bool have_output = gp_idx >= 0 && gp_idx < static_cast<int>(MAX_GAMEPADS) &&
+                                 bt_devices_[gp_idx].gamepad != nullptr;
+        Gamepad::PadOut gp_out{};
+        if (have_output) gp_out = bt_devices_[gp_idx].gamepad->get_pad_out();
+        bool xbox_keepalive_claims_hids = false;
+        if (have_output && bp_device->controller_type == CONTROLLER_TYPE_XBoxOneController &&
+            bp_device->hids_cid != 0 && gp_out.rumble_l == 0 && gp_out.rumble_r == 0)
         {
-        const int stall_idx = bp32_get_gamepad_output_idx(bp_device);
-        const unsigned stall_slot =
-            (stall_idx >= 0 && stall_idx < static_cast<int>(MAX_GAMEPADS))
-                ? static_cast<unsigned>(stall_idx)
-                : static_cast<unsigned>(i);
-        if (s_last_bt_input_ms[stall_slot] != 0 &&
-            (now_ms - s_last_bt_input_ms[stall_slot]) > BT_INPUT_STALL_DISCONNECT_MS)
-        {
-            printf("[Bluepad32] BT input stalled (%u ms); forcing disconnect (slot %u)\n",
-                   static_cast<unsigned>(now_ms - s_last_bt_input_ms[stall_slot]), static_cast<unsigned>(i));
-            uni_hid_device_disconnect(bp_device);
-            continue;
+            const uint32_t last_ka = s_xbox_ble_ka_last_ms[i];
+            if (last_ka == 0u || static_cast<uint32_t>(now_ms - last_ka) >= XBOX_BLE_KEEPALIVE_MS)
+            {
+                const uint8_t status = uni_hid_parser_xboxone_ble_keepalive_status(bp_device);
+                // SUCCESS means accepted by HIDS, possibly queued for GATT.
+                // Busy/rejected writes do not postpone the next attempt by 12s;
+                // the existing 250ms feedback timer bounds retries.
+                if (status == ERROR_CODE_SUCCESS) s_xbox_ble_ka_last_ms[i] = now_ms ? now_ms : 1u;
+                xbox_keepalive_claims_hids = status == ERROR_CODE_SUCCESS ||
+                                             status == ERROR_CODE_COMMAND_DISALLOWED;
+            }
         }
-        }
-    after_stall_check:
 
 #if defined(CONFIG_TARGET_PICO_W)
         /* Genuine Microsoft Xbox over LE only. The pinned 2026 parser stops
          * its startup GET poll after the FIRST HID event, even if that event
          * was itself a GET response and no notifications ever arrived.
          *
-         * Don't alter the upstream parser, pairing/security, or other pads.
+         * Keep startup input polling, pairing/security, and other pads unchanged.
          * Once a real input was observed and it becomes stale, request the
          * current state on our EXISTING feedback timer. The Device diagnostic
          * panel already counts both requests and replies, so failures stay
@@ -675,7 +744,7 @@ static void send_feedback_cb(btstack_timer_source *ts)
          *
          * This is a bounded fallback/diagnostic, not a claim of 60 Hz input
          * and not a replacement for repairing missing notifications. */
-        if (bp_device->vendor_id == 0x045eu &&
+        if (!xbox_keepalive_claims_hids && bp_device->vendor_id == 0x045eu &&
             bp_device->controller_type == CONTROLLER_TYPE_XBoxOneController &&
             bp_device->conn.handle != UNI_BT_CONN_HANDLE_INVALID &&
             gap_get_connection_type(bp_device->conn.handle) == GAP_CONNECTION_LE &&
@@ -698,25 +767,8 @@ static void send_feedback_cb(btstack_timer_source *ts)
         }
 #endif
 
-        // Bluepad32 may use BT slot 1 even though this build exposes only one
-        // Xbox pad. Feedback (including Xbox BLE keepalive) must use the same
-        // physical output mapping as the HID input callback, not raw BT slot.
-        const int out_i = bp32_get_gamepad_output_idx(bp_device);
-        const int gp_idx = resolve_bt_output_pad_idx(out_i >= 0 ? out_i : static_cast<int>(i));
-        if (gp_idx < 0 || gp_idx >= static_cast<int>(MAX_GAMEPADS) || bt_devices_[gp_idx].gamepad == nullptr)
-            continue;
-
-        Gamepad::PadOut gp_out = bt_devices_[gp_idx].gamepad->get_pad_out();
-        if (bp_device->controller_type == CONTROLLER_TYPE_XBoxOneController && bp_device->hids_cid != 0 &&
-            gp_out.rumble_l == 0 && gp_out.rumble_r == 0)
-        {
-            const uint32_t last_ka = s_xbox_ble_ka_last_ms[i];
-            if (last_ka == 0u || (now_ms - last_ka) >= XBOX_BLE_KEEPALIVE_MS)
-            {
-                uni_hid_parser_xboxone_ble_keepalive(bp_device);
-                s_xbox_ble_ka_last_ms[i] = now_ms;
-            }
-        }
+        // The mapping above also covers BT slot 1 on a single-output build.
+        if (!have_output) continue;
         if (uni_hid_parser_switch2_is_ble_device(bp_device) && uni_hid_parser_switch2_is_ready(bp_device) &&
             !uni_hid_parser_switch2_is_joycon_pair_secondary(bp_device) &&
             !uni_hid_parser_switch2_keepalive_timer_active(bp_device) &&
@@ -1064,9 +1116,10 @@ static void restore_bt_pairing_mode(int disconnected_idx) {
     led_timer_set_ = true;
     led_timer_.process = check_led_cb;
     led_timer_.context = nullptr;
-    btstack_run_loop_set_timer(&led_timer_, LED_CHECK_TIME_MS);
+    // Pico W's LED uses a synchronous CYW43 ioctl. Defer it out of the
+    // HCI/L2CAP disconnect callback to the existing LED timer.
+    btstack_run_loop_set_timer(&led_timer_, 1);
     btstack_run_loop_add_timer(&led_timer_);
-    board_api::set_led(false);
 
 #if defined(CONFIG_EN_BLUETOOTH) && defined(CONFIG_TARGET_PICO_W)
     ensure_idle_pairing_scans(disconnected_idx);
@@ -1116,10 +1169,10 @@ static void device_disconnected_cb(uni_hid_device_t* device) {
     s_xbox_ble_ka_last_ms[idx] = 0;
     s_sw2_ble_ka_last_ms[idx] = 0;
     s_xbox_ble_last_recovery_get_ms[idx] = 0;
+    reset_disconnect_combo(idx);
     /* Bluepad32 has two connection slots, but this build has one output pad.
      * Do not index output-pad state using a second Bluetooth slot. */
     if (idx < static_cast<int>(MAX_GAMEPADS)) {
-        s_bt_disconnect_combo_grace_until_ms[idx] = 0;
         s_ps4_rumble_ok_ms[idx] = 0;
         prev_touchpad_clicked_[idx] = false;
         pending_adaptive_trigger_send_[idx] = false;
@@ -1317,10 +1370,12 @@ static uni_error_t device_ready_cb(uni_hid_device_t* device) {
         uni_bt_bredr_scan_stop();
         gap_advertisements_enable(0);
     } else if (gap_get_connection_type(device->conn.handle) == GAP_CONNECTION_ACL) {
+        // Both supported builds have one output pad. LE discovery otherwise
+        // keeps its full scan window running beside the active Classic link.
+        uni_bt_le_scan_stop();
         gap_advertisements_enable(0);
         if (uni_hid_parser_switch_solo_needs_partner(device)) {
             /* Solo Joy-Con (L or R): keep inquiry + page scan for the partner; pause BLE scan. */
-            uni_bt_le_scan_stop();
             gap_connectable_control(1);
             uni_bt_bredr_scan_start();
         } else if (!uni_hid_parser_switch_any_awaiting_partner()) {
@@ -1331,7 +1386,7 @@ static uni_error_t device_ready_cb(uni_hid_device_t* device) {
     const uint32_t tnow = to_ms_since_boot(get_absolute_time());
     /* pad_idx already resolved above to avoid USB-owned OGX slots. */
     s_last_bt_input_ms[pad_idx] = tnow;
-    s_bt_disconnect_combo_grace_until_ms[pad_idx] = tnow + 3500u;
+    reset_disconnect_combo(idx, tnow, true);
     if (device->controller_type == CONTROLLER_TYPE_PS4Controller)
         s_ps4_rumble_ok_ms[pad_idx] = tnow + 6000u;
     /* Xbox BLE: 0 = send keepalive on next feedback tick (wakes Series/SW2 pad link immediately). */
@@ -1554,33 +1609,14 @@ static void controller_data_cb(uni_hid_device_t* device, uni_controller_t* contr
 
     if (uni_gp->misc_buttons & MISC_BUTTON_CAPTURE) gp_in.buttons |= gamepad->MAP_BUTTON_MISC;
 
-    // Check for disconnect combo: Start+Select for most controllers, L3+R3 for OUYA (no Start/Select)
-    static uint32_t disconnect_combo_hold_time[MAX_GAMEPADS] = {0};
+    // Observe the disconnect combo here; the feedback timer checks its elapsed
+    // hold time and disconnects after this parser callback has returned.
     const uint32_t now_cb = to_ms_since_boot(get_absolute_time());
-    const bool combo_grace =
-        (idx >= 0 && idx < MAX_GAMEPADS && now_cb < s_bt_disconnect_combo_grace_until_ms[idx]);
-    bool is_ouya = (device->controller_type == CONTROLLER_TYPE_OUYAController);
-    bool combo_pressed = is_ouya
+    const bool is_ouya = (device->controller_type == CONTROLLER_TYPE_OUYAController);
+    const bool combo_pressed = is_ouya
         ? ((uni_gp->buttons & BUTTON_THUMB_L) && (uni_gp->buttons & BUTTON_THUMB_R))
         : ((uni_gp->misc_buttons & MISC_BUTTON_START) && (uni_gp->misc_buttons & MISC_BUTTON_BACK));
-
-#if defined(CONFIG_OGXM_NETWORK)
-    if (!RemoteControl::physical_output_enabled()) combo_pressed = false;
-#endif
-    if (combo_grace) {
-        disconnect_combo_hold_time[idx] = 0;
-    } else if (combo_pressed) {
-        disconnect_combo_hold_time[idx]++;
-        // Require combo to be held for ~500ms (assuming ~60Hz callback rate, ~30 frames)
-        if (disconnect_combo_hold_time[idx] >= 30) {
-            printf("[BP32] Disconnect combo detected, disconnecting controller %d\n", idx);
-            bp32_disconnect_controller_and_joycon_partner(device);
-            disconnect_combo_hold_time[idx] = 0;
-            return; // Don't process further input after disconnect
-        }
-    } else {
-        disconnect_combo_hold_time[idx] = 0;
-    }
+    update_disconnect_combo(device, bt_slot, combo_pressed, now_cb);
 
     // Normalize Bluepad's physical report before ANY user profile transform.
     // Capture these values for calibration; calibrating processed output would

@@ -5,14 +5,24 @@
 # Xbox BLE is identified using 2026's pre-DIS heuristic, not post-DIS VID.
 function(dc_ogx_prepare_xbox_ble_security upstream_dir output_dir upstream_rev)
     set(_patched "${output_dir}/src/components/bluepad32/bt/uni_bt_le.c")
+    set(_keepalive_parser "${output_dir}/src/components/bluepad32/parser/uni_hid_parser_xboxone.c")
+    set(_keepalive_header "${output_dir}/src/components/bluepad32/include/parser/uni_hid_parser_xboxone.h")
     set(_stamp "${output_dir}/.dc_ogx_xbox_security_stamp")
     file(SHA256 "${CMAKE_CURRENT_FUNCTION_LIST_FILE}" _patch_sha)
     set(_desired_stamp "${upstream_rev}:${_patch_sha}")
-    if(EXISTS "${_stamp}" AND EXISTS "${_patched}")
+    if(EXISTS "${_stamp}" AND EXISTS "${_patched}" AND
+       EXISTS "${_keepalive_parser}" AND EXISTS "${_keepalive_header}")
         file(READ "${_stamp}" _current_stamp)
         file(READ "${_patched}" _current_source)
         string(FIND "${_current_source}" "dc_ogx_ms_xbox_security_gate" _verified)
-        if(_current_stamp STREQUAL _desired_stamp AND NOT _verified EQUAL -1)
+        file(READ "${_keepalive_parser}" _current_keepalive)
+        file(READ "${_keepalive_header}" _current_keepalive_header)
+        string(FIND "${_current_keepalive}" "uint8_t uni_hid_parser_xboxone_ble_keepalive_status(" _keepalive_verified)
+        string(FIND "${_current_keepalive}" "static const struct xboxone_ff_report ff =" _keepalive_storage_verified)
+        string(FIND "${_current_keepalive_header}" "uint8_t uni_hid_parser_xboxone_ble_keepalive_status(" _keepalive_header_verified)
+        if(_current_stamp STREQUAL _desired_stamp AND NOT _verified EQUAL -1 AND
+           NOT _keepalive_verified EQUAL -1 AND NOT _keepalive_storage_verified EQUAL -1 AND
+           NOT _keepalive_header_verified EQUAL -1)
             message(STATUS "dc-ogx-w: Xbox BLE security-gated source verified")
             return()
         endif()
@@ -166,6 +176,87 @@ static void ogxm_sm_request_pairing(uni_hid_device_t* device,]==])
     if(_gate_position EQUAL -1 OR _bond_position EQUAL -1)
         message(FATAL_ERROR "Microsoft Xbox BLE security source was not generated correctly")
     endif()
+    # Preserve the security implementation above byte-for-byte. Only expose
+    # the existing idle write's acceptance status and stable packet lifetime.
+    file(READ "${_keepalive_parser}" _source)
+    set(_old_keepalive [==[void uni_hid_parser_xboxone_ble_keepalive(uni_hid_device_t* d) {
+    if (d == NULL || !uni_hid_parser_xboxone_is_ble_hids(d))
+        return;
+    xboxone_instance_t* ins = get_xboxone_instance(d);
+    if (ins->version != XBOXONE_FIRMWARE_V5 && gap_get_connection_type(d->conn.handle) != GAP_CONNECTION_LE)
+        return;
+
+    struct xboxone_ff_report ff = {
+        .transaction_type = (HID_MESSAGE_TYPE_DATA << 4) | HID_REPORT_TYPE_OUTPUT,
+        .report_id = XBOX_RUMBLE_REPORT_ID,
+        .enable_actuators = 0,
+        .magnitude_left_trigger = 0,
+        .magnitude_right_trigger = 0,
+        .magnitude_strong = 0,
+        .magnitude_weak = 0,
+        .duration_10ms = 0,
+        .start_delay_10ms = 0,
+        .loop_count = 0,
+    };
+
+    uint8_t status = hids_host_send_write_report(d->hids_cid, XBOX_RUMBLE_REPORT_ID, HID_REPORT_TYPE_OUTPUT,
+                                                 &ff.enable_actuators, sizeof(ff) - 2);
+    if (status != ERROR_CODE_SUCCESS && status != ERROR_CODE_COMMAND_DISALLOWED) {
+        logd("Xbox BLE keepalive write status=%#x\n", status);
+    }
+}]==])
+    set(_new_keepalive [==[uint8_t uni_hid_parser_xboxone_ble_keepalive_status(uni_hid_device_t* d) {
+    if (d == NULL || !uni_hid_parser_xboxone_is_ble_hids(d))
+        return ERROR_CODE_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE;
+    xboxone_instance_t* ins = get_xboxone_instance(d);
+    if (ins->version != XBOXONE_FIRMWARE_V5 && gap_get_connection_type(d->conn.handle) != GAP_CONNECTION_LE)
+        return ERROR_CODE_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE;
+
+    // Connect rumble and delayed/retrying rumble belong to the parser, not PadOut.
+    // A zero-output keepalive must not interrupt those operations.
+    if (ins->rumble_state != XBOXONE_STATE_RUMBLE_DISABLED)
+        return ERROR_CODE_COMMAND_DISALLOWED;
+
+    // HIDS borrows this pointer, including while waiting for GATT readiness.
+    // The packet bytes are unchanged; keep them valid after this call returns.
+    static const struct xboxone_ff_report ff = {
+        .transaction_type = (HID_MESSAGE_TYPE_DATA << 4) | HID_REPORT_TYPE_OUTPUT,
+        .report_id = XBOX_RUMBLE_REPORT_ID,
+        .enable_actuators = 0,
+        .magnitude_left_trigger = 0,
+        .magnitude_right_trigger = 0,
+        .magnitude_strong = 0,
+        .magnitude_weak = 0,
+        .duration_10ms = 0,
+        .start_delay_10ms = 0,
+        .loop_count = 0,
+    };
+
+    uint8_t status = hids_host_send_write_report(d->hids_cid, XBOX_RUMBLE_REPORT_ID, HID_REPORT_TYPE_OUTPUT,
+                                                 &ff.enable_actuators, sizeof(ff) - 2);
+    if (status != ERROR_CODE_SUCCESS && status != ERROR_CODE_COMMAND_DISALLOWED) {
+        logd("Xbox BLE keepalive write status=%#x\n", status);
+    }
+    return status;
+}
+
+void uni_hid_parser_xboxone_ble_keepalive(uni_hid_device_t* d) {
+    (void)uni_hid_parser_xboxone_ble_keepalive_status(d);
+}]==])
+    _dc_xbox_gate_replace(_old_keepalive _new_keepalive "Xbox BLE keepalive status")
+    file(CHMOD "${_keepalive_parser}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+    file(WRITE "${_keepalive_parser}" "${_source}")
+    file(READ "${_keepalive_header}" _source)
+    set(_old_keepalive_header [==[void uni_hid_parser_xboxone_ble_keepalive(struct uni_hid_device_s* d);]==])
+    set(_new_keepalive_header [==[void uni_hid_parser_xboxone_ble_keepalive(struct uni_hid_device_s* d);
+/** HCI status from submitting the same idle write. SUCCESS means HIDS accepted
+ * it for transmission, not that the peer acknowledged it. Rumble/HIDS busy is
+ * COMMAND_DISALLOWED; callers may retry on their existing bounded timer. */
+uint8_t uni_hid_parser_xboxone_ble_keepalive_status(struct uni_hid_device_s* d);]==])
+    _dc_xbox_gate_replace(_old_keepalive_header _new_keepalive_header "Xbox BLE keepalive declaration")
+    file(CHMOD "${_keepalive_header}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+    file(WRITE "${_keepalive_header}" "${_source}")
+
     file(WRITE "${_stamp}" "${_desired_stamp}")
     message(STATUS "dc-ogx-w: Xbox BLE security gate uses upstream pre-DIS identity heuristic; waiting for SMP")
 endfunction()

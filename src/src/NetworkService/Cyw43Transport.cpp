@@ -48,11 +48,21 @@ constexpr std::uint32_t AP_CUTOVER_MS = 2500;
 constexpr std::uint32_t AP_RECOVERY_MS = 8000;
 bool station_joining{};
 bool station_retry_pending{};
+bool station_loss_pending{};
+bool station_settling{};
 bool control_active{};
 char station_ip[16]{};
 const char* station_error = "";
 std::uint32_t station_due{};
+std::uint32_t station_loss_due{};
+std::uint32_t station_stable_due{};
+std::uint8_t station_retry_step{};
 std::uint32_t station_reconnects{};
+constexpr std::uint32_t STATION_LOSS_GRACE_MS = 1500;
+constexpr std::uint32_t STATION_RECONNECT_MS = 1000;
+constexpr std::uint32_t STATION_STABLE_MS = 15000;
+constexpr std::uint32_t STATION_JOIN_TIMEOUT_MS = 25000;
+constexpr std::uint32_t STATION_RETRY_MS[] = {8000, 16000, 30000, 60000};
 bool mdns_initialized{};
 bool mdns_ap{};
 bool mdns_sta{};
@@ -73,6 +83,13 @@ std::uint32_t wifi_maintenance_due{};
 
 bool due(std::uint32_t now, std::uint32_t deadline) {
     return static_cast<std::int32_t>(now - deadline) >= 0;
+}
+
+std::uint32_t station_retry_delay() {
+    const auto delay = STATION_RETRY_MS[station_retry_step];
+    if (station_retry_step + 1u < sizeof(STATION_RETRY_MS) / sizeof(STATION_RETRY_MS[0]))
+        ++station_retry_step;
+    return delay;
 }
 
 void mdns_result(netif* interface, u8_t result, s8_t) {
@@ -181,7 +198,16 @@ void poll_station(std::uint32_t now) {
         char address[16]{};
         ip4addr_ntoa_r(netif_ip4_addr(interface), address, sizeof(address));
         const bool changed = !station_connected || std::strcmp(address, station_ip);
+        if (!station_connected) {
+            station_settling = true;
+            station_stable_due = now + STATION_STABLE_MS;
+        } else if (station_settling && due(now, station_stable_due)) {
+            // One brief successful sample must not reset a failed-join loop.
+            station_settling = false;
+            station_retry_step = 0;
+        }
         station_connected = true;
+        station_loss_pending = false;
         if (changed) {
             netif_set_default(interface);
             if (ap_active) ap_cutover_due = now + AP_CUTOVER_MS;
@@ -196,12 +222,23 @@ void poll_station(std::uint32_t now) {
         return;
     }
     if (station_connected) {
+        // CYW43 can briefly report JOIN/NOIP while the existing association
+        // recovers. Keep the listener/address and AP policy steady during that
+        // grace period instead of treating a single sample as a new outage.
+        if (!station_loss_pending) {
+            station_loss_pending = true;
+            station_loss_due = now + STATION_LOSS_GRACE_MS;
+        }
+        if (!due(now, station_loss_due)) return;
         station_connected = false;
+        station_loss_pending = false;
         station_ip[0] = '\0';
         mdns_sta_confirmed = false;
         station_error = "station_disconnected";
-        station_due = now + 20000;
+        station_due = now + (station_settling ? station_retry_delay() : STATION_RECONNECT_MS);
+        station_settling = false;
         if (!ap_active) ap_restore_due = now + AP_RECOVERY_MS;
+        return;
     }
     if (station_joining) {
         if (link < 0 || due(now, station_due)) {
@@ -211,7 +248,7 @@ void poll_station(std::uint32_t now) {
                             link == CYW43_LINK_NOIP ? "station_dhcp_timeout" :
                             link < 0 ? "station_join_failed" : "station_join_timeout";
             cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
-            station_due = now + 20000;
+            station_due = now + station_retry_delay();
             if (!ap_active && !ap_restore_due) ap_restore_due = now + AP_RECOVERY_MS;
         } else if (link == CYW43_LINK_NOIP) station_error = "station_waiting_for_address";
         return;
@@ -234,7 +271,7 @@ void poll_station(std::uint32_t now) {
         encrypted ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN);
     station_joining = result == 0;
     station_error = station_joining ? "station_joining" : "station_join_failed";
-    station_due = now + (station_joining ? 25000 : 20000);
+    station_due = now + (station_joining ? STATION_JOIN_TIMEOUT_MS : station_retry_delay());
 }
 
 // The official Pico W has separate netifs, but both share one CYW43 radio.
@@ -246,7 +283,7 @@ void poll_ap_mode(std::uint32_t now) {
     // A remote-control lease must not keep SoftAP broadcasting after STA
     // association and DHCP have succeeded.  AP clients will need to use the
     // station IP after cutover; the TCP listener continues on the STA netif.
-    if (station_connected && ap_active && due(now, ap_cutover_due)) {
+    if (station_connected && !station_loss_pending && ap_active && due(now, ap_cutover_due)) {
         if (mdns_ap) mdns_resp_remove_netif(&cyw43_state.netif[CYW43_ITF_AP]);
         mdns_ap = mdns_ap_confirmed = false;
         mdns_ap_error = "";
@@ -580,6 +617,7 @@ void set_control_active(bool active) { control_active = active; }
 bool retry_connection() {
     if (!station_enabled) return false;
     if (station_connected || station_joining) return true;
+    station_retry_step = 0;
     station_retry_pending = true;
     return true;
 }

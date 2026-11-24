@@ -773,6 +773,11 @@ size_t network_json(char *output, size_t capacity) {
 #else
     constexpr const char *board = "pico_w";
 #endif
+#if defined(CONFIG_EN_USB_HOST) || defined(CONFIG_EN_BLUETOOTH)
+    constexpr const char *physical_supported = "true";
+#else
+    constexpr const char *physical_supported = "false";
+#endif
     const char *delivery = transport.delivery == Transport::Delivery::PeerAcknowledged
                                ? "peer_acknowledged"
                                : "module_accepted";
@@ -781,7 +786,7 @@ size_t network_json(char *output, size_t capacity) {
         "{\"ready\":%s,\"ssid\":\"%s\",\"ip\":\"%s\",\"channel\":%u,"
         "\"clients\":%u,\"requests\":%lu,\"usb_configured\":%s,"
         "\"bluetooth_connected\":%s,%s\"wired_connected\":%s,\"remote_owned\":%s,\"board\":\"%s\","
-        "\"bluetooth_available\":%s,\"transport\":\"%s\",\"uart_baud\":%lu,"
+        "\"bluetooth_available\":%s,\"physical_supported\":%s,\"transport\":\"%s\",\"uart_baud\":%lu,"
         "\"input_hz\":%u,\"save_delivery\":\"%s\",\"error\":\"%s\","
         "\"ap_ip\":\"%s\",\"ap_active\":%s,\"station_configured\":%s,\"station_connected\":%s,"
         "\"station_joining\":%s,\"station_retry_pending\":%s,\"station_waiting_for\":\"%s\","
@@ -798,7 +803,7 @@ size_t network_json(char *output, size_t capacity) {
         OGXM_WIFI_CHANNEL, active_clients(),
         static_cast<unsigned long>(request_count), flags & 1 ? "true" : "false",
         flags & 2 ? "true" : "false", bt_flow, flags & 4 ? "true" : "false", flags & 8 ? "true" : "false", board,
-        transport.bluetooth_available ? "true" : "false", transport.name,
+        transport.bluetooth_available ? "true" : "false", physical_supported, transport.name,
         static_cast<unsigned long>(transport.uart_baud),
         static_cast<unsigned>(transport.recommended_input_hz), delivery, transport.error,
         transport.ap_ip, transport.ap_active ? "true" : "false",

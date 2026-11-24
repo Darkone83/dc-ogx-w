@@ -171,11 +171,14 @@ if(NOT OGXM_WIFI_CHANNEL MATCHES "^[0-9]+$" OR OGXM_WIFI_CHANNEL LESS 1 OR OGXM_
     message(FATAL_ERROR "OGXM_WIFI_CHANNEL must be 1-11")
 endif()
 
-string(TIMESTAMP _build_datetime "%Y-%m-%d %H:%M:%S")
+# Keep configure/build outputs independent of wall-clock time. The legacy
+# UserSettings API still calls this BUILD_DATETIME, but it only needs a stable
+# firmware identity; changing it on every configure rebuilds the entire image.
 add_compile_definitions(
     MAX_GAMEPADS=1 CONFIG_OGXM_USB_DEVICE_ONLY=1 CONFIG_OGXM_NETWORK=1
     FIRMWARE_NAME="dc-ogx-w" FIRMWARE_VERSION="${PROJECT_VERSION}"
-    OGXM_REMOTE_VERSION="${PROJECT_VERSION}" BUILD_DATETIME="${_build_datetime}"
+    OGXM_REMOTE_VERSION="${PROJECT_VERSION}" BUILD_DATETIME="dc-ogx-w-${PROJECT_VERSION}"
+    PICO_NO_BI_PROGRAM_BUILD_DATE=1
     OGXM_WIFI_SSID_PREFIX="${OGXM_WIFI_SSID_PREFIX}"
     OGXM_WIFI_PASSWORD="${OGXM_WIFI_PASSWORD}" OGXM_WIFI_CHANNEL=${OGXM_WIFI_CHANNEL}
     MAIN_LOOP_DELAY_US=${MAIN_LOOP_DELAY_US}

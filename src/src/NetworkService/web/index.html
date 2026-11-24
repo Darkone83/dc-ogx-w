@@ -1889,12 +1889,14 @@
         controlHealthDelayed = false,
         lastGamepadScan = 0,
         selectedGamepad = null,
-        lastStatus = null;
+        lastStatus = null,
+        modeStatus = null, lastModeStatusAt = 0,
+        networkStatus = null, lastNetworkStatusAt = 0;
       let controlWanted = false, reconnectTimer = null, reconnectAttempts = 0,
         controlEpoch = 0, recovering = false, gamepadNeedsNeutral = true,
         lastPingAt = 0, pingId = 0, pingSupported = false,
         bluetoothSupported = null, physicalSupported = null, inputMode = "physical", modePending = false, modeStalled = false,
-        modePendingObservedAt = 0, lastModeGeneration = null, modeBusy = false, modeSelectionDirty = false,
+        modePendingObservedAt = null, modeRetryTimer = null, lastModeGeneration = null, modeBusy = false, modeSelectionDirty = false,
         calibration = null, calibrationBusy = false, calibrationTimer = null, calibrationLoading = false;
       let maintenanceBusy = false, remoteMaintenance = false, deviceLoaded = false,
         deviceLoading = false, updateActionBusy = false, updateToken = null,
@@ -2640,18 +2642,25 @@
         }),
       );
 
-      function renderInputMode(state = lastStatus?.control || {}) {
-        const supported = state.bluetooth_supported ?? lastStatus?.network?.bluetooth_available;
-        const physical = state.physical_supported ?? lastStatus?.control?.physical_supported ?? supported;
+      function renderInputMode(state = modeStatus || {}) {
+        // Direct mode replies are authoritative even before the first full
+        // status succeeds. Capability-only updates must retain that state.
+        if (state !== modeStatus) {
+          if (["physical", "wifi", "configure"].includes(state.mode)) lastModeStatusAt = performance.now();
+          modeStatus = { ...modeStatus,
+            ...Object.fromEntries(Object.entries(state).filter(([, value]) => value !== undefined)) };
+        }
+        state = modeStatus;
+        const supported = state.bluetooth_supported ?? networkStatus?.bluetooth_available;
+        const physical = state.physical_supported ?? networkStatus?.physical_supported ?? supported;
         const wasBluetooth = bluetoothSupported;
         const wasPhysical = physicalSupported;
         if (typeof physical === "boolean") physicalSupported = physical;
         if (typeof supported === "boolean") bluetoothSupported = supported;
         if (["physical", "wifi", "configure"].includes(state.mode)) inputMode = state.mode;
-        if (lastStatus && state.mode) lastStatus.control = { ...lastStatus.control, ...state };
         if (typeof state.mode_pending === "boolean") {
           if (state.mode_pending && !modePending) modePendingObservedAt = performance.now();
-          if (!state.mode_pending) modePendingObservedAt = 0;
+          if (!state.mode_pending) modePendingObservedAt = null;
           modePending = state.mode_pending;
         }
         if (Number.isInteger(state.mode_generation) && state.mode_generation !== lastModeGeneration) {
@@ -2665,7 +2674,16 @@
         modeStalled = modePending && ((liveModeInfo && (state.mode_stalled === true ||
           Number(state.mode_pending_age_ms || 0) >= 5000)) ||
           (modeStalled && !liveModeInfo) ||
-          (modePendingObservedAt > 0 && performance.now() - modePendingObservedAt >= 6000));
+          (modePendingObservedAt !== null && performance.now() - modePendingObservedAt >= 6000));
+        if (modeRetryTimer !== null) clearTimeout(modeRetryTimer);
+        modeRetryTimer = null;
+        // This deadline only enables an explicit retry; it never assumes the
+        // handoff completed. It must run even while status requests fail.
+        if (modePending && !modeStalled && !document.hidden && modePendingObservedAt !== null)
+          modeRetryTimer = setTimeout(() => {
+            modeRetryTimer = null;
+            deviceButtons();
+          }, Math.max(1, 6000 - (performance.now() - modePendingObservedAt)));
         const modeLocked = modeBusy || (modePending && !modeStalled) || maintenanceBusy || remoteMaintenance;
         $("input-mode-card").hidden = physicalSupported !== true;
         $("tab-calibration").hidden = bluetoothSupported !== true;
@@ -3147,7 +3165,7 @@
       }
       function renderAppliedProfile() {
         const valid = Number.isInteger(appliedProfileId) && appliedProfileId >= 1 && appliedProfileId <= 8;
-        const currentLed = lastStatus?.network?.led;
+        const currentLed = networkStatus?.led;
         const color = valid && currentLed?.profile_id === appliedProfileId &&
           /^#[0-9a-f]{6}$/i.test(currentLed.profile_color || "") ? currentLed.profile_color
           : valid ? appliedProfileColors?.[appliedProfileId - 1] : null;
@@ -3373,6 +3391,9 @@
         $(id).className = "device-copy" + (error ? " error" : "");
       }
       function deviceButtons() {
+        // Refresh all mode gates when local maintenance or cached mode state
+        // changes, including when full controller telemetry is unavailable.
+        renderInputMode();
         const busy = maintenanceBusy || remoteMaintenance;
         const settingsBusy = busy || ledActionBusy || oledActionBusy || wifiRetrying || wifiScanBusy;
         const modeBlocked = physicalSupported === true && (inputMode !== "configure" || modeBusy || modePending);
@@ -3381,13 +3402,13 @@
         $("wifi-save").textContent = $("wifi-enabled").checked ? "Save and join" : "Save settings";
         $("wifi-forget").disabled = !wifiLoaded || writeBusy || wifiLoading;
         $("wifi-reload").disabled = settingsBusy || wifiLoading;
-        const mdnsNetwork = lastStatus?.network || {};
+        const mdnsNetwork = networkStatus || {};
         $("wifi-mdns-retry").disabled = settingsBusy || !online || !mdnsNetwork.ready ||
           !(mdnsNetwork.station_connected || (mdnsNetwork.bluetooth_available && !mdnsNetwork.station_configured));
         $("wifi-retry").disabled = !wifiLoaded || !networkSettings?.station_enabled || writeBusy || wifiLoading ||
-          Boolean(lastStatus?.network?.station_connected || lastStatus?.network?.station_joining || lastStatus?.network?.station_retry_pending);
+          Boolean(networkStatus?.station_connected || networkStatus?.station_joining || networkStatus?.station_retry_pending);
         $("wifi-ssid").required = $("wifi-enabled").checked;
-        $("wifi-scan").disabled = writeBusy || wifiLoading || !online || lastStatus?.network?.ready === false;
+        $("wifi-scan").disabled = writeBusy || wifiLoading || !online || networkStatus?.ready === false;
         $("wifi-scan").textContent = wifiScanBusy ? "Scanning…" : "Scan networks";
         $("wifi-scan-results").setAttribute("aria-busy", String(wifiScanBusy));
         $("wifi-scan-results").querySelectorAll("button").forEach((button) =>
@@ -3426,7 +3447,7 @@
         link.rel = "noopener";
         field.append(link);
       }
-      function renderWifiStatus(network = lastStatus?.network || {}) {
+      function renderWifiStatus(network = networkStatus || {}) {
         const configured = network.station_configured ?? Boolean(networkSettings?.station_enabled && networkSettings?.station_ssid);
         const code = network.station_error || (!network.ready ? network.error : "") || "";
         let state = "Not configured", detail = "The adapter's own Wi-Fi is available for setup and recovery.", failed = false;
@@ -3809,7 +3830,7 @@
         try {
           await releaseControl("Control released to retry joining Wi-Fi.");
           const reply = await api("/api/network/retry", {});
-          if (!reply.already_connected && lastStatus?.network) lastStatus.network.station_retry_pending = true;
+          if (!reply.already_connected && networkStatus) networkStatus.station_retry_pending = true;
           deviceMessage("wifi-message", reply.already_connected ? "Already connected to the saved network."
             : "Retry requested. Watch Connection for the result; the recovery access point remains available.");
           renderWifiStatus();
@@ -4124,7 +4145,7 @@
         return value === undefined || value === null ? "—" : String(value);
       }
       function renderBluetoothDiagnostics(network) {
-        const bt = network.bt_hid ?? lastStatus?.network?.bt_hid;
+        const bt = network.bt_hid ?? networkStatus?.bt_hid;
         const set = (id, value) => { const el = $(id); if (el) el.textContent = value; };
         if (network.bluetooth_available === false) {
           set("bt-diag-chip", "Not available");
@@ -4150,10 +4171,12 @@
         const neverReported = !bt.reports;
         const aged = !never(bt.age_ms) && bt.age_ms > 2000;
         const waiting = connected && bt.stage >= 3 && neverReported && !never(bt.ready_age_ms) && bt.ready_age_ms > 2000;
-        const stalled = connected && !neverReported && aged;
-        const state = waiting ? "HID ready · no reports" : stalled ? "HID reports stalled" : (stageNames[bt.stage] || "Unknown");
+        // Some controllers send reports only when their input changes. Report
+        // age alone cannot distinguish a held button / idle pad from link loss.
+        const idleInput = connected && !neverReported && aged;
+        const state = waiting ? "HID ready · no reports" : idleInput ? "Connected · input idle" : (stageNames[bt.stage] || "Unknown");
         const label = bt.name || (bt.vid ? "Controller" : "Not identified");
-        set("bt-diag-chip", waiting || stalled || bt.failure ? "Attention" : connected ? "Connected" : "Idle");
+        set("bt-diag-chip", waiting || bt.failure ? "Attention" : connected ? "Connected" : "Idle");
         set("bt-diag-controller", hasConnection ? label + (bt.vid ? " · " + hex(bt.vid, 4) + ":" + hex(bt.pid, 4).slice(2) : "") : "None this boot");
         set("bt-diag-state", state);
         set("bt-diag-transport", hasConnection ? (bt.le ? "Bluetooth LE" : "Bluetooth Classic") + " · BT " + bt.slot + " / Xbox " + bt.output : "—");
@@ -4182,13 +4205,23 @@
         set("bt-diag-get", h.get_try === undefined ? "Waiting" :
             h.get_try + " requests · " + (h.get_rejected || 0) + " rejected · " + statusText(h.get_status));
         set("bt-diag-note", waiting ? "The controller reached READY, but no gamepad report has arrived. Check BLE HID/GATT setup."
-          : stalled ? "Bluetooth still reports connected, but HID input has stopped. This is a symptom, not a confirmed pairing error."
           : bt.failure ? "Failure was observed by the Bluetooth event handler. Details reset when the adapter reboots."
+          : idleInput ? "The Bluetooth link is connected. Some controllers send reports only when input changes; the last report's age does not indicate a disconnect."
           : "Observed from Bluepad32 callbacks and BTstack pairing/HCI events. Internal GATT errors are not exposed here.");
       }
       function renderDeviceNetwork(network) {
-        if (typeof network.bluetooth_available === "boolean" && bluetoothSupported !== network.bluetooth_available)
-          renderInputMode({ bluetooth_supported: network.bluetooth_available });
+        // Radio telemetry can remain available while the controller snapshot
+        // is busy. Keep it separately: it must never replace a confirmed mode,
+        // lease, or profile with invented/default controller state.
+        const receivedNetworkStatus = typeof network.ready === "boolean";
+        networkStatus = { ...networkStatus,
+          ...Object.fromEntries(Object.entries(network).filter(([, value]) => value !== undefined)) };
+        network = networkStatus;
+        if (receivedNetworkStatus) lastNetworkStatusAt = performance.now();
+        if ((typeof network.bluetooth_available === "boolean" && bluetoothSupported !== network.bluetooth_available) ||
+            (typeof network.physical_supported === "boolean" && physicalSupported !== network.physical_supported))
+          renderInputMode({ bluetooth_supported: network.bluetooth_available,
+            physical_supported: network.physical_supported });
         if (Number.isInteger(network.input_hz) && network.input_hz >= 10)
           // Legacy ESP-AT shares one UART command pipe for HTTP and control.
           // Cap its input traffic at 30Hz to keep settings/status responsive.
@@ -4218,16 +4251,17 @@
           : LED_STATES.find(([key]) => key === network.led?.state)?.[1] || valueText(network.led?.state).replaceAll("_", " ");
         const ledPin = Number.isInteger(network.led?.pin) && network.led.pin >= 0 && network.led.pin <= 29 ? network.led.pin : 8;
         document.querySelectorAll("[data-led-pin]").forEach((label) => (label.textContent = "GPIO " + ledPin));
+        deviceButtons();
       }
       function updateStatus(s) {
         lastStatus = s;
-        renderInputMode(s.control || {});
         const mode = s.output_mode ?? s.mode ?? s.driver ?? "—",
           remote = s.control ?? s.remote ?? {},
           network = s.network ?? {},
           usb = s.usb ?? {};
         const wasRemoteMaintenance = remoteMaintenance;
         remoteMaintenance = Boolean(remote.maintenance);
+        renderInputMode(s.control || {});
         if (remoteMaintenance && !wasRemoteMaintenance) {
           message("Firmware update active. Controller input is paused until it finishes.");
           if (token !== null) void releaseControl("Firmware update active. Controller input is paused.");
@@ -4268,8 +4302,8 @@
                       ? "No remote input"
                       : valueText(s.input_source ?? "Local controller");
         if (Number.isInteger(s.applied_profile_id)) appliedProfileId = s.applied_profile_id;
-        renderAppliedProfile();
         renderDeviceNetwork({ ...network, ssid: network.ssid ?? s.ssid, ip: network.ip ?? s.ip });
+        renderAppliedProfile();
         if (s.board) $("device-board").textContent = s.board;
         const firmware = s.remote_version ? "dc-ogx-w " + s.remote_version : s.firmware_version ?? s.version ?? s.firmware;
         if (firmware) $("device-version").textContent = firmware;
@@ -4290,6 +4324,8 @@
       }
       let statusFailures = 0;
       let lastGoodStatusAt = 0;
+      let nextNetworkRefreshAt = 0;
+      let nextModeRefreshAt = 0;
       let statusPollTimer = null, statusPolling = false, statusRefreshPending = false;
       function scheduleStatusPoll(delay) {
         if (statusPollTimer !== null) clearTimeout(statusPollTimer);
@@ -4340,29 +4376,64 @@
           } catch (e) {
             const busyReply = e.status === 503 && ["service_busy", "led_busy"].includes(e.code);
             ++statusFailures;
+            // Recover the smaller authoritative mode snapshot independently
+            // of full telemetry. Never send a mode change or infer completion
+            // from radio reachability, and yield to queued user operations.
+            if (!document.hidden && !maintenanceBusy && !modeBusy && queuedApiRequests === 0 &&
+                performance.now() >= nextModeRefreshAt) {
+              nextModeRefreshAt = performance.now() + 10000;
+              try {
+                const state = await api("/api/control/mode", undefined, 2500,
+                  () => !document.hidden && !maintenanceBusy && !modeBusy);
+                if (["physical", "wifi", "configure"].includes(state.mode) && typeof state.mode_pending === "boolean") {
+                  online = true;
+                  renderInputMode(state);
+                }
+              } catch (_) { /* Retain confirmed mode and acknowledgement state. */ }
+            }
+            // /api/network does not take the controller mailbox. A bounded,
+            // infrequent fallback keeps board capabilities and Wi-Fi recovery
+            // visible even when the first status request after idle fails.
+            // Yield to user operations and never replay a failed write here.
+            if (!document.hidden && !maintenanceBusy && queuedApiRequests === 0 &&
+                performance.now() >= nextNetworkRefreshAt) {
+              nextNetworkRefreshAt = performance.now() + 10000;
+              try {
+                const network = await api("/api/network", undefined, 2500, () => !document.hidden);
+                if (typeof network.ready === "boolean") {
+                  online = true;
+                  renderDeviceNetwork(network);
+                }
+              } catch (_) { /* Preserve the last confirmed state; regular polling continues. */ }
+            }
             const controlConnected = token !== null && ws && ws.readyState === WebSocket.OPEN;
             const recentlyHealthy = online && lastGoodStatusAt &&
               performance.now() - lastGoodStatusAt < 15000 && statusFailures <= 2;
+            const radioRecentlyHealthy = lastNetworkStatusAt > 0 &&
+              performance.now() - lastNetworkStatusAt < 15000;
+            const modeRecentlyHealthy = lastModeStatusAt > 0 &&
+              performance.now() - lastModeStatusAt < 15000;
             // A single transient status failure does not mean the adapter or control
             // stream disconnected. The periodic telemetry request is not a heartbeat.
-            if (!busyReply && statusFailures >= 3 && !controlConnected) online = false;
+            if (!busyReply && statusFailures >= 3 && !controlConnected && !radioRecentlyHealthy && !modeRecentlyHealthy) online = false;
             $("connection-chip").classList.toggle("online", online);
             $("connection-text").textContent = wifiScanBusy ? "Scanning Wi-Fi"
               : recentlyHealthy || controlConnected ? "Connected"
-              : busyReply ? "Status delayed" : "Offline";
+              : busyReply || radioRecentlyHealthy || modeRecentlyHealthy ? "Status delayed" : "Offline";
             $("footer-status").textContent = recentlyHealthy
               ? "Connected · telemetry retrying"
               : controlConnected ? "Control connected · telemetry delayed"
               : wifiScanBusy ? "Wi-Fi scan in progress · waiting for status"
-              : busyReply ? "Adapter responding · status delayed" : "Adapter unavailable";
-            if (!recentlyHealthy && lastStatus) deviceMessage("device-information-message",
-              "Live status is delayed. Showing the last received board information.");
+              : busyReply || radioRecentlyHealthy || modeRecentlyHealthy ? "Adapter responding · status delayed" : "Adapter unavailable";
+            if (!recentlyHealthy && (lastStatus || networkStatus)) deviceMessage("device-information-message",
+              radioRecentlyHealthy ? "Radio information is available. Controller status is delayed; retaining the last confirmed control settings."
+                : "Live status is delayed. Showing the last received board information.");
             // Only advise reconnecting after sustained failures, not on one
             // missed request while another control or calibration task is active.
-            if (!recentlyHealthy && !controlConnected && !connecting && !controlWanted && !wifiScanBusy && !busyReply)
+            if (!recentlyHealthy && !radioRecentlyHealthy && !modeRecentlyHealthy && !controlConnected && !connecting && !controlWanted && !wifiScanBusy && !busyReply)
               message("Connect to the adapter’s Wi-Fi or your saved network, then keep this page open.");
           }
-          setButtons();
+          deviceButtons();
           nextPoll = statusFailures ? 6000 : token === null ? 3500 : 5000;
         } finally {
           statusPolling = false;
@@ -4372,6 +4443,7 @@
       }
       function refreshTelemetry() {
         if (document.hidden) return;
+        deviceButtons();
         // Focus, pageshow and visibilitychange can arrive together. Coalesce
         // them into one refresh without reloading settings or unsaved edits.
         if (statusPolling) statusRefreshPending = true;
@@ -4382,6 +4454,8 @@
         if (statusPollTimer !== null) clearTimeout(statusPollTimer);
         if (calibrationTimer !== null) clearTimeout(calibrationTimer);
         statusPollTimer = calibrationTimer = null;
+        if (modeRetryTimer !== null) clearTimeout(modeRetryTimer);
+        modeRetryTimer = null;
         statusRefreshPending = false;
       }
       window.addEventListener("focus", refreshTelemetry);
